@@ -8203,7 +8203,7 @@ if __name__ == "__main__":
     print()
     print("Usage examples:")
     print("""
-  import mx_triton as mxt, torch, torch.nn as nn
+  import qtpytorch as mxt, torch, torch.nn as nn
 
   # Works exactly like standard PyTorch:
   model = nn.Sequential(nn.Linear(512, 256), nn.ReLU(), nn.Linear(256, 128))
