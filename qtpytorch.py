@@ -1,5 +1,5 @@
 """
-mx_triton.py — MX (Microscaling) Quantization System
+qtpytorch.py — Quantization System
 =====================================================
 Pure PyTorch + Triton.  No C++.  No fake quantization.
 Real bit-packed storage.  Execute arithmetic ON packed representations.
