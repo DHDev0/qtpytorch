@@ -1361,6 +1361,6 @@ Contributions welcome! Please read CONTRIBUTING.md for guidelines.
   title = {mxtorch: Sub-byte Quantization for PyTorch with Triton GPU Kernels},
   author = Daniel Derycke,
   year = {2026},
-  url = {[https://github.com/your-org/mxtorch](https://github.com/DHDev0/mxtorch/)}
+  url = {https://github.com/DHDev0/mxtorch/}
 }
 ```
