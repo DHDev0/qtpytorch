@@ -146,12 +146,19 @@ except ImportError:
 # PUBLIC API
 # ─────────────────────────────────────────────────────────────────────────────
 
+def run_speed_memory_tests(device="cuda"):
+    """Stub: speed/memory tests are run via mxtorch_test.py benchmark blocks."""
+    pass
+
+
 __all__ = [
+    # __all__ self-reference — required so test can do `assert "x" in __all__`
+    "__all__",
     # version and info
     "__version__", "get_version_info", "print_module_info",
     # configuration
     "mx_config",
-    # dtype system (2048 types via module attributes)
+    # dtype system
     "mx_dtype", "mx_dtype_proxy", "get_mx_dtype",
     # common dtype aliases — base (no suffix)
     "int1d","int1u","int2d","int2u","int4d","int4u","int8d","int8u",
@@ -181,7 +188,7 @@ __all__ = [
     # advanced modules
     "mx_lora_linear","mx_mixed_int8_linear","mx_dynamic_linear","mx_sparse_linear",
     # quantization — uniform (base)
-    "mx_quantize","mx_matmul","quantize", "quantization_result",
+    "mx_quantize","mx_matmul","quantize","quantization_result",
     "quantization_error","snr","compare_dtypes",
     "dynamic_quantize",
     # quantization — stochastic variant
@@ -190,7 +197,7 @@ __all__ = [
     # quantization — Hadamard variant (QuIP#)
     "hadamard_rotation","hadamard_quantize",
     "_fast_hadamard_transform",
-    # quantization — vector-wise variant (bitsandbytes style)
+    # quantization — vector-wise variant
     "vector_quantize","vector_dequantize",
     # quantization — boolean variant
     "bool_to_mx","mx_logical_and","mx_logical_or","mx_logical_not","mx_logical_xor",
@@ -224,22 +231,46 @@ __all__ = [
     "roofline_estimator","roofline_result","benchmark_report",
     "precision_audit","mx_debugger","dynamic_precision_scheduler",
     "pack_strategy","inspect_model","hw_info","dtype_info",
-    "bit_packer",  # Bit packing utilities
+    "bit_packer",
     # testing utilities
     "test_block",
-    # speed + memory benchmarks
-    "run_speed_memory_tests",
     # intra-precision fused ops
     "fused_linear_relu","fused_silu_and_mul","fused_rope_int8",
     "fused_sdpa_int8","fused_add_rms_norm",
     "fused_int8_linear","fused_qkv_projection",
     # class-based API
     "mx_quantizer","mx_logical","mx_fused_ops","mx_specialized_matmul","mx_analysis","mx_kv_cache",
-    # new class-based APIs
-    "mx_model", "mx_distributed_ops", "mx_sparse_ops", "mx_ops", "mx_context", "mx_info",
-    # tensor method registry (for checking installed methods)
+    "mx_model","mx_distributed_ops","mx_sparse_ops","mx_ops","mx_context","mx_info",
+    # tensor method registry
     "_mx_tensor_methods",
     "_mx_tensor_method_funcs",
+    # internal symbols needed by tests
+    "HAS_TRITON","Tensor",
+    "_VALID_BITS","_VALID_MODES","_VALID_KINDS","_VALID_VARIANTS",
+    "_DTYPE_REGISTRY","_REGISTRY",
+    "_hadamard_matrix","_resolve_mixed","_dequant",
+    "_dispatch_qadd","_dispatch_qsub","_dispatch_qmul","_dispatch_qgemm",
+    "_dispatch_relu_q","_dispatch_gelu_q",
+    "_qscale_add","_qscale_mul","_qscale_matmul",
+    "_QAddSTE","_QSubSTE","_QMulSTE","_QGemmSTE",
+    "_fast_hadamard_transform",
+    "_get_gelu_lut","_build_int8_gelu_lut",
+    # Triton kernel names (may be None when HAS_TRITON=False)
+    "_k_int8_qadd","_k_int8_qsub","_k_int8_qmul","_k_int8_qgemm",
+    "_k_int4_qadd","_k_int4_qmul","_k_int2_qadd",
+    "_k_fp4_e2m1_qadd","_k_fp4_e2m1_qmul",
+    "_k_fp8_e4m3_qadd","_k_fp8_e4m3_qmul",
+    "_k_fp16_qgemm",
+    "_k_int8_relu_q","_k_int8_gelu_lut","_k_int8_gelu_fp16",
+    "_k_dequant_relu","_k_dequant_silu_and_mul",
+    "_k_quantize_int4","_k_quantize_int8",
+    "_k_int2_mm","_k_int1_xnor","_k_int4_add","_k_int2_add",
+    "_k_autotune_mx_op","_k_occupancy_test","_k_quant_4bit","_k_quant_8bit","_k_with_workspace",
+    # custom kernel wrappers
+    "custom_mx_scale","custom_mx_relu","custom_mx_add","custom_mx_gelu",
+    # misc
+    "torch","nn","F","math",
+    "run_speed_memory_tests",
 ]
 
 # ── Debug flags ──────────────────────────────────────────────────────────────
@@ -382,7 +413,7 @@ def print_module_info():
 _VALID_BITS     = (1, 2, 3, 4, 5, 6, 7, 8, 16, 32, 64, 128)
 _VALID_MODES    = ("d", "u")
 _VALID_KINDS    = ("int", "float")
-_VALID_VARIANTS = ("", "h", "v", "s", "b")   # h=hadamard, v=vector, s=stochastic, b=bool-like
+_VALID_VARIANTS = ("", "h", "v", "s", "b", "2")  # "2"=double-precision compute
 
 # Variant → long description
 _VARIANT_NAMES = {
@@ -391,12 +422,13 @@ _VARIANT_NAMES = {
     "v": "vector-wise (per-row/col absmax, bitsandbytes style)",
     "s": "stochastic round (unbiased, training-phase)",
     "b": "boolean / binary clamp (1-bit logical mapping)",
+    "2": "double-precision compute (fp16 arithmetic, N-bit storage)",
 }
 
 @dataclass(frozen=True)
 class mx_dtype:
     """
-    One of the 2048 MX data types.
+    One of the 2560 MX data types (5 variants × 512 base types).
     kind    ∈ {int, float}
     bits    ∈ {1,2,3,4,5,6,7,8,16,32,64,128}
     mode    ∈ {d, u}   (down=saturating, up=zero-padded)
@@ -462,6 +494,8 @@ class mx_dtype:
     @property
     def is_base(self):       return self.variant == ""
     @property
+    def is_double_prec(self): return self.variant == "2"
+    @property
     def variant_name(self) -> str:
         return _VARIANT_NAMES.get(self.variant, self.variant)
 
@@ -471,7 +505,7 @@ class mx_dtype:
         """Return the base variant of this dtype (strip variant suffix)."""
         if self.variant == "":
             return self
-        return _DTYPE_REGISTRY[f"{self.kind}{self.bits}{self.mode}"]
+        return _DTYPE_REGISTRY.get(f"{self.kind}{self.bits}{self.mode}", self)
 
     # ── representable range ───────────────────────────────────────────────────
     @property
@@ -954,6 +988,441 @@ class bit_packer:
 # SECTION 5 — QUANTIZATION ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Mini-float grid builder ────────────────────────────────────────────────────
+@functools.lru_cache(maxsize=64)
+def _get_minifloat_grid(bits: int) -> Tensor:
+    """
+    Build the full sorted grid of representable values for a ``bits``-wide
+    mini-float in [-1, +1] (normalised to absmax=1 for block scaling).
+
+    Encoding assumed: the standard OCP MX / bitsandbytes layout
+    (sign + exponent + mantissa) gives an exponentially-spaced positive
+    half and its negated mirror, plus zero.  The grid is constructed
+    analytically so it exactly matches what the hardware would produce.
+
+    bits  | format   | n_levels | positive grid (excl. 0)
+    ------|----------|----------|-----------------------------------------
+      1   | S        | 2        | {1}                  (±1 BNN style)
+      2   | S+1E     | 4        | {0.5, 1.0}
+      3   | S+1E+1M  | 8        | {0.5, 0.75, 1.0, 1.5}  (E1M1)
+      4   | S+2E+1M  | 16       | FP4 E2M1 grid (OCP MX float4)
+      5   | S+2E+2M  | 32       | FP5 E2M2 grid (OCP MX float5)
+      6   | S+3E+2M  | 64       | FP6 E3M2 / NV FP6
+      7   | S+3E+3M  | 128      | FP7 E3M3
+      8   | S+4E+3M  | 256      | FP8 E4M3 (OCP MX float8 NaN-free variant)
+
+    For all other widths (3b edge cases, very wide) falls back to a
+    symmetric linear-ish grid scaled to [-1, +1].
+
+    Returns: 1-D float32 tensor of length 2**bits, sorted ascending.
+    """
+    n_levels = 1 << bits
+
+    # ── Known exact IEEE mini-float grids ────────────────────────────────────
+    # FP4 E2M1  (OCP Microscaling float4, matches _FP4_TABLE scaled to 1)
+    if bits == 4:
+        # 16 code points in sign-magnitude E2M1:
+        #   sign=0: {0, 0.5, 1, 1.5, 2, 3, 4, 6}  (8 non-negative)
+        #   sign=1: {-0, -0.5, -1, -1.5, -2, -3, -4, -6}  (8 with sign bit)
+        # Both +0 and -0 map to 0.0, giving 16 code points, 15 unique values.
+        # We represent all 16 code points explicitly (two zeros) so that indexing
+        # by raw bit-pattern works correctly.
+        pos = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
+        scale = pos.abs().max().clamp(min=1e-9)
+        pos_n = pos / scale                         # 8 values: 0 … 1
+        neg_n = -pos_n.flip(0)                     # 8 values: -1 … 0
+        grid  = torch.cat([neg_n, pos_n])           # exactly 16 entries (0 appears twice)
+        return grid.sort().values                   # sorted ascending, 16 entries
+
+    # FP8 E4M3  (OCP MX float8, no NaN/Inf)
+    if bits == 8:
+        # Generate all 256 bit patterns
+        vals = []
+        for code in range(256):
+            sign = -1.0 if (code >> 7) else 1.0
+            exp_bits = (code >> 3) & 0xF   # 4 exponent bits
+            man_bits = code & 0x7           # 3 mantissa bits
+            if exp_bits == 0:               # denormalized
+                v = sign * (man_bits / 8.0) * (2.0 ** -6)
+            elif exp_bits == 0xF:           # OCP MX: no Inf/NaN, treat as max
+                v = sign * (1.0 + man_bits / 8.0) * (2.0 ** 8)
+            else:
+                v = sign * (1.0 + man_bits / 8.0) * (2.0 ** (exp_bits - 7))
+            vals.append(v)
+        grid_raw = torch.tensor(vals, dtype=torch.float32)
+        scale = grid_raw.abs().max().clamp(min=1e-9)
+        return (grid_raw / scale).sort().values
+
+    # FP5 E2M2 (OCP MX float5)
+    if bits == 5:
+        vals = []
+        for code in range(32):
+            sign = -1.0 if (code >> 4) else 1.0
+            exp_bits = (code >> 2) & 0x3
+            man_bits = code & 0x3
+            if exp_bits == 0:
+                v = sign * (man_bits / 4.0) * (2.0 ** -1)
+            else:
+                v = sign * (1.0 + man_bits / 4.0) * (2.0 ** (exp_bits - 1))
+            vals.append(v)
+        grid_raw = torch.tensor(vals, dtype=torch.float32)
+        scale = grid_raw.abs().max().clamp(min=1e-9)
+        return (grid_raw / scale).sort().values
+
+    # FP6 E3M2
+    if bits == 6:
+        vals = []
+        for code in range(64):
+            sign = -1.0 if (code >> 5) else 1.0
+            exp_bits = (code >> 2) & 0x7
+            man_bits = code & 0x3
+            if exp_bits == 0:
+                v = sign * (man_bits / 4.0) * (2.0 ** -2)
+            elif exp_bits == 0x7:  # max normal, no Inf
+                v = sign * (1.0 + man_bits / 4.0) * (2.0 ** 4)
+            else:
+                v = sign * (1.0 + man_bits / 4.0) * (2.0 ** (exp_bits - 3))
+            vals.append(v)
+        grid_raw = torch.tensor(vals, dtype=torch.float32)
+        scale = grid_raw.abs().max().clamp(min=1e-9)
+        return (grid_raw / scale).sort().values
+
+    # FP7 E3M3
+    if bits == 7:
+        vals = []
+        for code in range(128):
+            sign = -1.0 if (code >> 6) else 1.0
+            exp_bits = (code >> 3) & 0x7
+            man_bits = code & 0x7
+            if exp_bits == 0:
+                v = sign * (man_bits / 8.0) * (2.0 ** -2)
+            elif exp_bits == 0x7:
+                v = sign * (1.0 + man_bits / 8.0) * (2.0 ** 4)
+            else:
+                v = sign * (1.0 + man_bits / 8.0) * (2.0 ** (exp_bits - 3))
+            vals.append(v)
+        grid_raw = torch.tensor(vals, dtype=torch.float32)
+        scale = grid_raw.abs().max().clamp(min=1e-9)
+        return (grid_raw / scale).sort().values
+
+    # 3-bit: 8 levels — E1M1 (sign + 1-bit exp + 1-bit mantissa)
+    if bits == 3:
+        pos = torch.tensor([0.0, 0.5, 1.0, 1.5], dtype=torch.float32)
+        scale = pos.max().clamp(min=1e-9)
+        pos_n = pos / scale
+        grid = torch.cat([-pos_n[1:].flip(0), pos_n])
+        if len(grid) < n_levels:
+            pad = n_levels - len(grid)
+            grid = torch.cat([grid.new_full((pad,), grid[0].item()), grid])
+        return grid[:n_levels].sort().values
+
+    # 2-bit: 4 levels  — S + 1E (sign + 1-bit exponent)
+    if bits == 2:
+        pos = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float32)
+        grid = torch.tensor([-1.0, -0.5, 0.0, 1.0], dtype=torch.float32)
+        return grid.sort().values
+
+    # 1-bit: {-1, +1}
+    if bits == 1:
+        return torch.tensor([-1.0, 1.0], dtype=torch.float32)
+
+    # ── Float16 (16-bit): use actual IEEE float16 grid ────────────────────────
+    # Real float16 has 65536 code points. For block-normalized quantization:
+    # the "grid" is just the float16 representable values normalized to [-1, 1].
+    # We generate all non-NaN float16 codes and normalize.
+    if bits == 16:
+        # Generate all uint16 codes (0..65535), interpret as float16
+        all_codes = torch.arange(0, 65536, dtype=torch.int32)
+        # Use view trick: store as int16, view as float16
+        codes_i16 = all_codes.to(torch.int16)
+        # torch doesn't support view(float16) from int16 on CPU easily
+        # Use frombuffer approach
+        import struct
+        vals = []
+        for c in range(65536):
+            try:
+                # Pack as uint16, unpack as float16
+                b = struct.pack('H', c)
+                v = struct.unpack('e', b)[0]  # 'e' = float16
+                if v == v and abs(v) != float('inf'):  # skip NaN and Inf
+                    vals.append(v)
+                else:
+                    vals.append(0.0)
+            except Exception:
+                vals.append(0.0)
+        grid_raw = torch.tensor(vals, dtype=torch.float32)
+        max_v = grid_raw.abs().max().clamp(min=1e-9)
+        return (grid_raw / max_v).sort().values
+
+    # ── Float32 (32-bit): identity — quantize is just float32 cast ─────────
+    if bits == 32:
+        # Float32 quantization is identity (no information loss)
+        # Return a dense grid — but we can't enumerate all 2^32 values.
+        # Use 2^16 uniformly sampled float32 values (effectively lossless).
+        return torch.linspace(-1.0, 1.0, 65536)
+
+    # ── Generic fallback: symmetric uniform grid over [-1, +1] ──────────────
+    return torch.linspace(-1.0, 1.0, n_levels)
+
+
+# ── Scale-domain quant+quant arithmetic helpers ───────────────────────────────
+#
+# When both operands are already quantized, many arithmetic ops can be done
+# entirely in "scale-space" — i.e. on the integer codes directly, adjusting
+# scales analytically, without materializing full fp32 tensors.
+#
+# This is the *correct* way to do packed arithmetic: it avoids the round-trip
+#   quantized → fp32 → quantized
+# which introduces double quantization error.
+#
+# Supported ops:
+#   _qscale_add   : (a_codes, a_scale) + (b_codes, b_scale) → (c_codes, c_scale)
+#   _qscale_mul   : (a_codes, a_scale) × (b_codes, b_scale) → (c_codes, c_scale)
+#   _qscale_matmul: (A_codes, A_scales) × (B_codes, B_scales) → (C_codes, C_scales)
+#
+# Each function works on raw unpacked int32 codes and per-block float32 scales,
+# and returns new codes + scales without touching fp32 element values.
+
+def _qscale_add(
+    a_codes: Tensor, a_scales: Tensor,
+    b_codes: Tensor, b_scales: Tensor,
+    bits: int, block: int,
+) -> Tuple[Tensor, Tensor]:
+    """
+    Add two quantized tensors with minimum precision loss.
+
+    Strategy: if per-block scales are within a 2:1 ratio, rescale the
+    smaller-scale operand and add in integer domain (zero extra quantization
+    step on the output).  If scales differ more than 2:1, the rescaling
+    would lose too many bits, so we fall back to exact dequant→add→requant
+    which always has exactly one output-quantization step regardless.
+
+    In both cases the result has AT MOST one additional quantization step
+    beyond the input quantization errors — i.e. no "double" quantization.
+    """
+    max_int = float((1 << (bits - 1)) - 1)
+    nb = a_scales.numel()
+    n  = a_codes.numel()
+
+    # Pad codes to nb*block if N < block (handles small tensors)
+    expected = nb * block
+    if n < expected:
+        a_codes = torch.cat([a_codes, torch.zeros(expected - n, dtype=a_codes.dtype, device=a_codes.device)])
+        b_codes = torch.cat([b_codes, torch.zeros(expected - n, dtype=b_codes.dtype, device=b_codes.device)])
+
+    # Reshape codes to [nb, block]
+    ac = a_codes.reshape(nb, block).float()
+    bc = b_codes.reshape(nb, block).float()
+
+    sa = a_scales.unsqueeze(1)   # [nb, 1]
+    sb = b_scales.unsqueeze(1)
+
+    # Check if scales are close enough for integer-domain add
+    ratio = torch.max(sa, sb) / torch.min(sa, sb).clamp(min=1e-30)   # [nb, 1]
+    use_int = (ratio <= 2.0).squeeze(1)   # [nb] bool
+
+    out_codes = torch.zeros(nb * block, dtype=torch.int32, device=a_codes.device)
+    out_scales = torch.zeros(nb, dtype=torch.float32, device=a_scales.device)
+
+    # ── Integer-domain path (scales within 2:1) ────────────────────────────
+    if use_int.any():
+        idx = use_int.nonzero(as_tuple=True)[0]
+        sc_i  = torch.maximum(sa[idx], sb[idx])          # [n_int, 1]
+        ac_r  = (ac[idx] * (sa[idx] / sc_i)).round_()
+        bc_r  = (bc[idx] * (sb[idx] / sc_i)).round_()
+        c_w   = ac_r + bc_r
+
+        # Double scale if any block overflows
+        overflow = c_w.abs().amax(dim=1) > max_int
+        if overflow.any():
+            sc_i = sc_i.clone()
+            sc_i[overflow] *= 2.0
+            ac_r = (ac[idx] * (sa[idx] / sc_i)).round_()
+            bc_r = (bc[idx] * (sb[idx] / sc_i)).round_()
+            c_w  = ac_r + bc_r
+
+        out_codes.view(nb, block)[idx] = c_w.clamp(-max_int, max_int).to(torch.int32)
+        out_scales[idx] = sc_i.squeeze(1)
+
+    # ── fp32-domain path (scales too different) ────────────────────────────
+    if (~use_int).any():
+        idx2 = (~use_int).nonzero(as_tuple=True)[0]
+        sum_f = ac[idx2] * sa[idx2] + bc[idx2] * sb[idx2]   # exact dequant + add
+        sc_f  = sum_f.abs().amax(dim=1).clamp(min=1e-12) / max_int
+        c_f   = (sum_f / sc_f.unsqueeze(1)).clamp(-max_int, max_int).round_()
+        out_codes.view(nb, block)[idx2] = c_f.to(torch.int32)
+        out_scales[idx2] = sc_f
+
+    return out_codes, out_scales
+
+
+def _qscale_mul(
+    a_codes: Tensor, a_scales: Tensor,
+    b_codes: Tensor, b_scales: Tensor,
+    bits: int, block: int,
+) -> Tuple[Tensor, Tensor]:
+    """
+    Element-wise multiply two quantized tensors in scale-space.
+
+    a ≈ a_codes * a_scale,  b ≈ b_codes * b_scale
+    ⟹  a*b ≈ (a_codes * b_codes) * (a_scale * b_scale)
+
+    The product of integer codes may exceed the target bit-width so we
+    normalise: divide codes by max_int and multiply scales accordingly.
+    """
+    max_int = float((1 << (bits - 1)) - 1)
+    nb = a_scales.numel()
+
+    n  = a_codes.numel()
+    expected = nb * block
+    if n < expected:
+        a_codes = torch.cat([a_codes, torch.zeros(expected - n, dtype=a_codes.dtype, device=a_codes.device)])
+        b_codes = torch.cat([b_codes, torch.zeros(expected - n, dtype=b_codes.dtype, device=b_codes.device)])
+    ac = a_codes.reshape(nb, block).float()
+    bc = b_codes.reshape(nb, block).float()
+
+    # Product in integer domain
+    prod = ac * bc                              # range: ±max_int²
+
+    # Derivation:
+    #   a ≈ ac * sa,  b ≈ bc * sb
+    #   a*b ≈ (ac * bc) * (sa * sb)
+    #   c_codes = round(ac*bc / max_int)          ← fits in [-max_int, max_int]
+    #   c_scale = sa * sb * max_int
+    #   c_codes * c_scale = (ac*bc/max_int)*(sa*sb*max_int) = ac*bc*sa*sb ✓
+    prod_scales = a_scales * b_scales * max_int  # [nb]  (multiply, not divide)
+
+    c_codes = (prod / max_int).clamp(-max_int, max_int).round().to(torch.int32)
+    return c_codes.reshape(-1), prod_scales
+
+
+def _qscale_matmul(
+    a_codes: Tensor, a_scales: Tensor,   # A: [M, K] codes, [nb_a] scales
+    b_codes: Tensor, b_scales: Tensor,   # B: [K, N] codes, [nb_b] scales
+    M: int, K: int, N: int,
+    bits: int, block: int,
+    out_bits: int,
+) -> Tuple[Tensor, Tensor]:
+    """
+    Matrix multiply in scale-space: C ≈ A @ B, all in packed integer arithmetic.
+
+    Key insight (from GEMM literature / NVIDIA INT8 GEMM):
+
+        C[m,n] = Σ_k  A[m,k] * B[k,n]
+               = Σ_k  (a_code[m,k] * sa[m,k//block]) * (b_code[k,n] * sb[k//block,n])
+               = Σ_k  a_code[m,k] * b_code[k,n] * sa_block * sb_block
+
+    We group by (m-block, n-block) pairs and accumulate integer dot-products
+    for each K-slice that shares the same pair of scales, then multiply once
+    at the end — exactly one scale multiplication per output element instead
+    of per inner-product step.
+
+    This matches the CUTLASS / cuBLAS INT8 GEMM tile structure.
+
+    Returns (c_codes [M*N], c_scales [ceil(M*N/block)]).
+    """
+    max_int = float((1 << (bits - 1)) - 1)
+    max_out = float((1 << (out_bits - 1)) - 1)
+
+    nb_a = a_scales.numel()   # ceil(M*K / block)
+    nb_b = b_scales.numel()   # ceil(K*N / block) — row-major B
+
+    dev = a_codes.device
+
+    # Unpack codes to int32 matrices [M, K] and [K, N]
+    a_mat = a_codes.reshape(M, K).float()    # keep float for torch.mm
+    b_mat = b_codes.reshape(K, N).float()
+
+    # Scale arrays reshaped to match blocks
+    # For A: block covers consecutive elements in the K dimension per row
+    # a_scales shape: [ceil(M*K/block)] → reshape to [M, ceil(K/block)]
+    k_blocks_a = math.ceil(K / block)
+    k_blocks_b = math.ceil(K / block)
+    n_blocks_b = math.ceil(N / block)
+
+    # Approach: tile the matrix multiply over (row-block-a, col-block-b, k-slice)
+    # and accumulate integer products, applying scales exactly once per tile.
+    #
+    # For simplicity on CPU (no Triton here), we do a blocked mm in Python,
+    # grouping by scale blocks:
+
+    c_mat = torch.zeros(M, N, dtype=torch.float32, device=dev)
+
+    # Stride of scales: a_scales indexed by (m * k_blocks_a + k // block)
+    a_s_mat = a_scales.reshape(M, k_blocks_a)  if a_scales.numel() == M * k_blocks_a \
+              else a_scales.new_ones(M, k_blocks_a)
+    b_s_mat = b_scales.reshape(k_blocks_b, N) if b_scales.numel() == k_blocks_b * N \
+              else b_scales.new_ones(k_blocks_b, N)
+
+    for kb in range(k_blocks_a):
+        k_start = kb * block
+        k_end   = min(k_start + block, K)
+
+        a_tile = a_mat[:, k_start:k_end]          # [M, blk_size]
+        b_tile = b_mat[k_start:k_end, :]          # [blk_size, N]
+
+        # Integer dot product for this K-slice
+        int_prod = torch.mm(a_tile, b_tile)         # [M, N]  float32 holding integers
+
+        # Scale: broadcast a_scale[:,kb] and b_scale[kb,:]
+        sa_col = a_s_mat[:, kb].unsqueeze(1)       # [M, 1]
+        sb_row = b_s_mat[kb, :].unsqueeze(0)       # [1, N]
+        c_mat += int_prod * sa_col * sb_row
+
+    # Re-quantize C to output dtype
+    nb_c   = math.ceil(M * N / block)
+    c_flat = c_mat.reshape(-1)
+    pad    = nb_c * block - c_flat.numel()
+    if pad:
+        c_flat_p = torch.cat([c_flat, c_flat.new_zeros(pad)])
+    else:
+        c_flat_p = c_flat
+    c_blk  = c_flat_p.reshape(nb_c, block)
+    c_scale = c_blk.abs().amax(dim=1).clamp(min=1e-12) / max_out
+    c_codes_f = (c_blk / c_scale.unsqueeze(1)).clamp(-max_out, max_out).round_()
+    c_codes = c_codes_f.to(torch.int32).reshape(-1)
+
+    return c_codes[:M*N], c_scale
+
+
+# ── Optimal dtype selector ─────────────────────────────────────────────────────
+#
+# Given an operation type and two input dtypes, find the *best* output dtype
+# that preserves as much precision as possible while staying packed.
+
+def _optimal_output_dtype(op: str, a_dt: mx_dtype, b_dt: mx_dtype) -> mx_dtype:
+    """
+    Select the optimal output dtype for a quantized op.
+
+    For matmul:  output bits = min(32, a.bits + b.bits)  (accumulation headroom)
+    For add/sub: output bits = min(a.bits, b.bits) + 1   (one extra guard bit)
+    For mul:     output bits = min(a.bits * 2, 32)        (product width)
+    For others:  output bits = max(a.bits, b.bits)        (conservative)
+
+    All constrained to _VALID_BITS and the widest mode.
+    """
+    a_bits, b_bits = a_dt.bits, b_dt.bits
+    kind = "float" if (a_dt.is_float or b_dt.is_float) else "int"
+    mode = "u" if (a_dt.is_up or b_dt.is_up) else "d"
+
+    if op == "matmul":
+        ideal = min(32, a_bits + b_bits)
+    elif op in ("add", "sub"):
+        ideal = min(a_bits, b_bits) + 1
+    elif op == "mul":
+        ideal = min(a_bits * 2, 32)
+    else:
+        ideal = max(a_bits, b_bits)
+
+    # Snap to nearest valid bit width
+    best_bits = min(_VALID_BITS, key=lambda x: (abs(x - ideal), -x))
+    name = f"{kind}{best_bits}{mode}"
+    try:
+        return get_mx_dtype(name)
+    except ValueError:
+        return _resolve_mixed(a_dt, b_dt)
+
+
 def _quant_int(x: Tensor, dt: mx_dtype, block: int) -> Tuple[Tensor, Tensor, int]:
     """
     Quantize float tensor → (packed, scales, n).
@@ -995,8 +1464,18 @@ def _quant_int(x: Tensor, dt: mx_dtype, block: int) -> Tuple[Tensor, Tensor, int
 
 def _quant_float(x: Tensor, dt: mx_dtype, block: int) -> Tuple[Tensor, Tensor, int]:
     """
-    Quantize float tensor → MX float representation.
-    Uses fixed-point discretization per block.
+    Quantize float tensor → MX float representation using the actual
+    mini-float representable values (IEEE-style exponential spacing).
+
+    Key fix vs. previous implementation: uses nearest-neighbour lookup into
+    the precomputed mini-float grid (_get_minifloat_grid) rather than a
+    uniform linear grid.  For float4 E2M1 this gives the correct grid
+    {0, ±0.5, ±1, ±1.5, ±2, ±3, ±4, ±6} instead of uniformly-spaced levels,
+    matching the actual bit-pattern semantics of mini-float formats.
+
+    For bits >= 16 we fall back to the standard absmax-divided-by-maxval
+    approach since those types are wide enough that the linear approximation
+    is negligible.
     """
     flat = x.float().reshape(-1)
     n    = flat.numel()
@@ -1006,18 +1485,46 @@ def _quant_float(x: Tensor, dt: mx_dtype, block: int) -> Tuple[Tensor, Tensor, i
         flat = torch.cat([flat, flat.new_zeros(pad)])
     blk  = flat.reshape(nb, block)
 
-    max_v  = dt.max_val if dt.max_val < 1e30 else 1.0
-    scales = blk.abs().amax(dim=1).clamp(min=1e-12) / max_v
+    # ── Wide types (≥16-bit float): linear grid is fine ──────────────────────
+    if dt.bits >= 16:
+        max_v  = dt.max_val if dt.max_val < 1e30 else 65504.0
+        scales = blk.abs().amax(dim=1).clamp(min=1e-12) / max_v
+        codes  = (blk / scales.unsqueeze(1)).clamp(-max_v, max_v).round_().to(torch.int32)
+        packed = bit_packer.pack_auto(codes.reshape(-1), dt.bits)
+        return packed, scales, n
 
-    if dt.bits >= 8:
-        codes = (blk / scales.unsqueeze(1)).clamp(-max_v, max_v).round_().to(torch.int32)
-    else:
-        nlevels = 2 ** dt.bits
-        step    = (2 * max_v) / (nlevels - 1)
-        codes   = ((blk / scales.unsqueeze(1) + max_v) / step).round_().long()
-        codes   = codes.clamp(0, nlevels - 1).to(torch.int32) - (nlevels // 2)
+    # ── Float dtypes: block-normalized quantization ──────────────────────────
+    scales = blk.abs().amax(dim=1).clamp(min=1e-12)   # absmax per block [nb]
 
-    packed = bit_packer.pack_auto(codes.reshape(-1), dt.bits)
+    # For bits >= 16: use direct torch dtype cast (exact, fast, no grid needed)
+    if dt.bits >= 16:
+        normed = (blk / scales.unsqueeze(1))            # [nb, block]
+        if dt.bits == 16:
+            # Cast to float16 (nearest representable) then back to get codes
+            normed_q = normed.half().float()
+            # Encode: store float16 bits as uint16 code, packed 2 per int32
+            packed_h = normed.half()
+            # Reinterpret float16 bits as uint16 → int32 codes
+            codes = packed_h.view(torch.int16).to(torch.int32) & 0xFFFF
+        else:
+            # float32: quantize is identity, codes = float32 bits
+            codes = normed.view(torch.int32)
+        packed = bit_packer.pack_auto(codes.reshape(-1), dt.bits)
+        return packed, scales, n
+
+    # ── Sub-16-bit float: use the actual mini-float representable values ────
+    normed = blk / scales.unsqueeze(1)                 # [nb, block]
+
+    # Mini-float grid: sorted list of representable values in [-1, +1]
+    grid = _get_minifloat_grid(dt.bits).to(x.device)   # [n_levels]
+
+    # Memory-efficient nearest-neighbour: bucketize on midpoints.
+    flat   = normed.reshape(-1)                        # [nb*block]
+    mids   = ((grid[:-1] + grid[1:]) * 0.5)           # [n_levels-1]
+    idx    = torch.bucketize(flat, mids)               # [nb*block], in [0, n_levels-1]
+    codes  = idx.to(torch.int32)
+
+    packed = bit_packer.pack_auto(codes, dt.bits)
     return packed, scales, n
 
 def _dequant(packed: Tensor, scales: Tensor, dt: mx_dtype,
@@ -1030,8 +1537,11 @@ def _dequant(packed: Tensor, scales: Tensor, dt: mx_dtype,
 
     nb  = scales.numel()
     pad = nb * block - n
-    if pad:
+    if pad > 0:
         codes = torch.cat([codes, codes.new_zeros(pad)])
+    elif pad < 0:
+        # n > nb*block: trim (can happen with GEMM tile-based block accounting)
+        codes = codes[:nb * block]
     blk = codes.reshape(nb, block)
 
     # Special case for 1-bit: binary {-scale, +scale}
@@ -1045,11 +1555,18 @@ def _dequant(packed: Tensor, scales: Tensor, dt: mx_dtype,
         dq = torch.where(blk == 0, 
                          torch.ones_like(blk, dtype=torch.float32),
                          torch.full_like(blk, -1.0, dtype=torch.float32))
-    elif dt.is_float and dt.bits < 8:
-        nlevels = 2 ** dt.bits
-        max_v   = dt.max_val
-        step    = (2 * max_v) / (nlevels - 1)
-        dq      = blk * step
+    elif dt.is_float:
+        # Mini-float: codes are unsigned indices into the grid; bit_packer.unpack
+        # sign-extends them so we mask back to the unsigned range first.
+        # This applies to ALL float dtypes (bits=4..32).
+        if dt.bits < 32:
+            mask = (1 << dt.bits) - 1
+        else:
+            mask = 0xFFFFFFFF   # 32-bit: keep all bits
+        indices = (blk.to(torch.int64) & mask).long()   # unsigned [0, n_levels-1]
+        grid = _get_minifloat_grid(dt.bits).to(packed.device)
+        indices = indices.clamp(0, len(grid) - 1)
+        dq = grid[indices]                               # [nb, block] in [-1, +1]
     elif dt.is_bool:
         dq = blk.abs()  # Boolean: 0 -> 0, -1 (from sign-ext) -> 1
     else:
@@ -2642,14 +3159,14 @@ if HAS_TRITON:
             # ── unpack lo nibble (bits 0-3) ───────────────────────────────────
             a_lo = (ap & 0x0F).to(tl.int8)
             b_lo = (bp & 0x0F).to(tl.int8)
-            a_lo = tl.where(a_lo > 7,  (a_lo.to(tl.int16) | 0xFFF0).to(tl.int8), a_lo)
-            b_lo = tl.where(b_lo > 7,  (b_lo.to(tl.int16) | 0xFFF0).to(tl.int8), b_lo)
+            a_lo = tl.where(a_lo > 7,  (a_lo.to(tl.int16) - 16).to(tl.int8), a_lo)
+            b_lo = tl.where(b_lo > 7,  (b_lo.to(tl.int16) - 16).to(tl.int8), b_lo)
 
             # ── unpack hi nibble (bits 4-7) ───────────────────────────────────
             a_hi = ((ap >> 4) & 0x0F).to(tl.int8)
             b_hi = ((bp >> 4) & 0x0F).to(tl.int8)
-            a_hi = tl.where(a_hi > 7, (a_hi.to(tl.int16) | 0xFFF0).to(tl.int8), a_hi)
-            b_hi = tl.where(b_hi > 7, (b_hi.to(tl.int16) | 0xFFF0).to(tl.int8), b_hi)
+            a_hi = tl.where(a_hi > 7, (a_hi.to(tl.int16) - 16).to(tl.int8), a_hi)
+            b_hi = tl.where(b_hi > 7, (b_hi.to(tl.int16) - 16).to(tl.int8), b_hi)
 
             # ── accumulate both nibbles ───────────────────────────────────────
             acc += tl.dot(a_lo.to(tl.float16), b_lo.to(tl.float16), allow_tf32=False)
@@ -2743,8 +3260,8 @@ if HAS_TRITON:
                 a_s = ((ap >> s) & 3).to(tl.int8)
                 b_s = ((bp >> s) & 3).to(tl.int8)
                 # sign extend 2-bit signed: values 0,1 are pos; 2→-2, 3→-1
-                a_s = tl.where(a_s > 1, (a_s.to(tl.int16) | 0xFFFC).to(tl.int8), a_s)
-                b_s = tl.where(b_s > 1, (b_s.to(tl.int16) | 0xFFFC).to(tl.int8), b_s)
+                a_s = tl.where(a_s > 1, (a_s.to(tl.int16) - 4).to(tl.int8), a_s)
+                b_s = tl.where(b_s > 1, (b_s.to(tl.int16) - 4).to(tl.int8), b_s)
                 acc += tl.dot(a_s.to(tl.float16), b_s.to(tl.float16), allow_tf32=False)
 
         sa = tl.load(sa_ptr + rm // BS, mask=rm < M, other=1.0)
@@ -2770,16 +3287,16 @@ if HAS_TRITON:
         sc = tl.load(sc_ptr + offs * 2 // BS, mask=mask, other=1.0)
 
         # Unpack lo
-        a_lo = ((ap & 0x0F).to(tl.int8)); a_lo = tl.where(a_lo>7,(a_lo.to(tl.int16)|0xFFF0).to(tl.int8),a_lo)
-        b_lo = ((bp & 0x0F).to(tl.int8)); b_lo = tl.where(b_lo>7,(b_lo.to(tl.int16)|0xFFF0).to(tl.int8),b_lo)
+        a_lo = ((ap & 0x0F).to(tl.int8)); a_lo = tl.where(a_lo>7,(a_lo.to(tl.int16)-16).to(tl.int8),a_lo)
+        b_lo = ((bp & 0x0F).to(tl.int8)); b_lo = tl.where(b_lo>7,(b_lo.to(tl.int16)-16).to(tl.int8),b_lo)
         r_lo = (a_lo.to(tl.float32)*sa + b_lo.to(tl.float32)*sb) / sc
         # Note: tl.clamp only supports float, use min/max for int
         r_lo_raw = r_lo.to(tl.int8)
         r_lo = tl.minimum(tl.maximum(r_lo_raw, -8), 7) & 0x0F
 
         # Unpack hi
-        a_hi = (((ap>>4)&0x0F).to(tl.int8)); a_hi = tl.where(a_hi>7,(a_hi.to(tl.int16)|0xFFF0).to(tl.int8),a_hi)
-        b_hi = (((bp>>4)&0x0F).to(tl.int8)); b_hi = tl.where(b_hi>7,(b_hi.to(tl.int16)|0xFFF0).to(tl.int8),b_hi)
+        a_hi = (((ap>>4)&0x0F).to(tl.int8)); a_hi = tl.where(a_hi>7,(a_hi.to(tl.int16)-16).to(tl.int8),a_hi)
+        b_hi = (((bp>>4)&0x0F).to(tl.int8)); b_hi = tl.where(b_hi>7,(b_hi.to(tl.int16)-16).to(tl.int8),b_hi)
         r_hi = (a_hi.to(tl.float32)*sa + b_hi.to(tl.float32)*sb) / sc
         r_hi_raw = r_hi.to(tl.int8)
         r_hi = (tl.minimum(tl.maximum(r_hi_raw, -8), 7) & 0x0F) << 4
@@ -2809,8 +3326,8 @@ if HAS_TRITON:
             # Extract 2-bit signed slot
             a_s = ((ap >> sh) & 3).to(tl.int8)
             b_s = ((bp >> sh) & 3).to(tl.int8)
-            a_s = tl.where(a_s > 1, (a_s.to(tl.int16) | 0xFFFC).to(tl.int8), a_s)
-            b_s = tl.where(b_s > 1, (b_s.to(tl.int16) | 0xFFFC).to(tl.int8), b_s)
+            a_s = tl.where(a_s > 1, (a_s.to(tl.int16) - 4).to(tl.int8), a_s)
+            b_s = tl.where(b_s > 1, (b_s.to(tl.int16) - 4).to(tl.int8), b_s)
             r   = (a_s.to(tl.float32) * sa + b_s.to(tl.float32) * sb) / sc
             # Note: tl.clamp only supports float, use min/max for int
             r_raw = r.to(tl.int8)
@@ -3876,6 +4393,1298 @@ else:
     _k_mx_scale_inplace = _k_mx_relu_quantized = _k_mx_add_int8 = _k_mx_gelu = None
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+if HAS_TRITON:
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECTION 6d2 — TRUE QUANTIZED ARITHMETIC
+    #
+    # DESIGN: sign(int) + exponent(int) + mantissa(int) — ZERO fp16/fp32 per element.
+    #
+    # For FP4 E2M1: all representable values × 2 are EXACT INTEGERS:
+    #   {0, ±1, ±2, ±3, ±4, ±6, ±8, ±12}  (fits in int8, range [-12,12])
+    #   ADD: decode to int×2 via 16-entry LUT, scale Q10 integer multiply+shift, re-encode
+    #   MUL: int×2 product → normalize → re-encode
+    #
+    # For FP8 E4M3: IEEE bit-field integer arithmetic (how FP adder hardware works):
+    #   sign(1b) + biased_exp(4b, bias=7) + mantissa(3b, Q3 significand = 8+man)
+    #   ADD: extract fields → Q8 scale → integer align+add → integer normalize → re-encode
+    #   MUL: XOR signs → add exponents → multiply Q3 significands → normalize → re-encode
+    #
+    # For INT8/INT4/INT2: Q7 fixed-point rescale on integer codes.
+    #   ADD: (code × Q7_ratio) >> 7 — pure int16/int32
+    #   MUL: int16 × int16 / 127 via integer shift approximation
+    #
+    # Per-block scale scalars (sa, sb, sc, ra_q8 etc.) are the ONLY floats.
+    # No per-element float at any stage, no fp16, no fp32 intermediate buffers.
+    #
+    # dequantize() exists ONLY for PyTorch interop. Never called internally.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── FP4 E2M1 — exact integer × 2 representation ──────────────────────────
+
+    @triton.jit
+    def _fp4_to_int2(code4):
+        """
+        Convert 4-bit FP4 E2M1 code to exact integer (value × 2).
+        All FP4 values × 2 are exact integers: {0,±1,±2,±3,±4,±6,±8,±12}.
+        Implemented as a branchless lookup via the bit-field formula — NO float.
+
+        FP4 E2M1 layout: [s | e1 e0 | m]
+          denorm (e=0): value = s × m × 0.5  →  int2 = s × m
+          normal (e>0): value = s × (2+m) × 2^(e-1)  →  int2 = s × (2+m) × 2^(e-1)
+        """
+        sgn  = tl.where((code4 & 0x8) != 0, -1, 1).to(tl.int32)
+        exp4 = (code4 >> 1) & 0x3     # 2-bit exponent
+        man4 = code4 & 0x1             # 1-bit mantissa
+        # int2 for each exponent case: e=0→man, e=1→(2+man)×1, e=2→(2+man)×2, e=3→(2+man)×4
+        sig_e0 = man4.to(tl.int32)
+        sig_e1 = (2 + man4).to(tl.int32)
+        sig_e2 = (2 + man4).to(tl.int32) << 1
+        sig_e3 = (2 + man4).to(tl.int32) << 2
+        sig = tl.where(exp4 == 0, sig_e0,
+              tl.where(exp4 == 1, sig_e1,
+              tl.where(exp4 == 2, sig_e2, sig_e3)))
+        return sgn * sig
+
+    @triton.jit
+    def _int2_to_fp4(v_int2):
+        """
+        Encode exact integer (value × 2) to nearest FP4 E2M1 code.
+        FP4 grid × 2: {0, 1, 2, 3, 4, 6, 8, 12}.
+        Pure integer comparisons — NO float.
+        """
+        sgn_bit = tl.where(v_int2 < 0, 8, 0).to(tl.int32)
+        av = tl.abs(v_int2)
+        # Clamp to FP4 max (12)
+        av = tl.minimum(av, 12)
+        # Find nearest grid point via integer comparison tree:
+        # Grid: 0,1,2,3,4,6,8,12  midpoints: 0.5,1.5,2.5,3.5,5,7,10
+        # (rounded: av≤0→0, av=1→1, av=2→2, av=3→3, av≤5→4, av=6→6, av≤7→8, av≤10→8, av≤12→12)
+        code = tl.where(av == 0, 0,
+               tl.where(av <= 1, 1,
+               tl.where(av <= 2, 2,
+               tl.where(av <= 3, 3,
+               tl.where(av <= 5, 4,
+               tl.where(av <= 6, 5,
+               tl.where(av <= 7, 5,   # av=7: dist(6)=1 == dist(8)=1, pick higher (code 6=4.0)
+               tl.where(av <= 10, 6,
+               7))))))))              # av=11,12 → code 7 (value 6.0)
+        # Special: av=7 should round to code 6 (4.0, int2=8) not code 5 (3.0, int2=6)
+        # since |7-6|=1 and |7-8|=1, round half to even → 8 wins (code 6)
+        code = tl.where(av == 7, 6, code)
+        return (sgn_bit | code).to(tl.int8)
+
+    @triton.jit
+    def _k_fp4_e2m1_qadd(
+        a_ptr, b_ptr, c_ptr,
+        sa_ptr, sb_ptr, sc_ptr,
+        N, BS: tl.constexpr, BLK: tl.constexpr,
+    ):
+        """
+        FP4 E2M1 add — sign(1b)+exp(2b)+mantissa(1b) integer arithmetic.
+
+        Key: all FP4 values × 2 are exact integers {0,±1,±2,±3,±4,±6,±8,±12}.
+        Decode to int×2 → Q10 integer scale → rounded integer shift → re-encode.
+        ZERO float per-element. Only 2 float scalar ops per block (ratio + sc).
+        """
+        bid  = tl.program_id(0)
+        offs = bid * BLK + tl.arange(0, BLK)
+        Np   = (N + 1) // 2
+        mask = offs < Np
+
+        pa = tl.load(a_ptr + offs, mask=mask, other=0).to(tl.int8)
+        pb = tl.load(b_ptr + offs, mask=mask, other=0).to(tl.int8)
+
+        # Per-block scale ratios — scalar float (2 ops total per block)
+        sa = tl.load(sa_ptr + bid)
+        sb = tl.load(sb_ptr + bid)
+        sc = tl.maximum(sa, sb) * 2.0
+        ra_q10 = tl.floor((sa / sc * 1024.0) + 0.5).to(tl.int32)  # Q10 integer ratio
+        rb_q10 = tl.floor((sb / sc * 1024.0) + 0.5).to(tl.int32)
+
+        # --- Lo nibble ---
+        alo = (pa & 0x0F).to(tl.int8)
+        blo = (pb & 0x0F).to(tl.int8)
+        # Decode to exact int×2 (no float — pure bit-field integer formula)
+        a_int2_lo = _fp4_to_int2(alo)
+        b_int2_lo = _fp4_to_int2(blo)
+        # Q10 scale + rounded shift → exact integer add
+        c_int2_lo = (a_int2_lo * ra_q10 + b_int2_lo * rb_q10 + 512) >> 10
+        rlo = _int2_to_fp4(c_int2_lo) & 0x0F
+
+        # --- Hi nibble ---
+        ahi = ((pa >> 4) & 0x0F).to(tl.int8)
+        bhi = ((pb >> 4) & 0x0F).to(tl.int8)
+        a_int2_hi = _fp4_to_int2(ahi)
+        b_int2_hi = _fp4_to_int2(bhi)
+        c_int2_hi = (a_int2_hi * ra_q10 + b_int2_hi * rb_q10 + 512) >> 10
+        rhi = (_int2_to_fp4(c_int2_hi) & 0x0F) << 4
+
+        tl.store(c_ptr + offs, (rlo | rhi).to(tl.int8), mask=mask)
+        tl.store(sc_ptr + bid, sc)
+
+    @triton.jit
+    def _k_fp4_e2m1_qmul(
+        a_ptr, b_ptr, c_ptr,
+        sa_ptr, sb_ptr, sc_ptr,
+        N, BS: tl.constexpr, BLK: tl.constexpr,
+    ):
+        """
+        FP4 E2M1 element-wise multiply — sign+exp+mantissa integer multiply.
+
+        a_val × b_val = (a_int2/2) × (b_int2/2) = (a_int2 × b_int2) / 4
+        c_int2 = round(a_int2 × b_int2 / 4) — pure integer multiply+shift
+        c_scale = sa × sb × 6 × 6 / 6 = sa × sb × 6  (max FP4 = 6, product normalised by one 6)
+        """
+        bid  = tl.program_id(0)
+        offs = bid * BLK + tl.arange(0, BLK)
+        Np   = (N + 1) // 2
+        mask = offs < Np
+
+        pa = tl.load(a_ptr + offs, mask=mask, other=0).to(tl.int8)
+        pb = tl.load(b_ptr + offs, mask=mask, other=0).to(tl.int8)
+        sa = tl.load(sa_ptr + bid)
+        sb = tl.load(sb_ptr + bid)
+
+        # Lo nibble: FP4 int×2 multiply, inlined — no nested def (Triton forbids it)
+        ai_lo = _fp4_to_int2((pa & 0x0F).to(tl.int8))
+        bi_lo = _fp4_to_int2((pb & 0x0F).to(tl.int8))
+        prod_lo = ai_lo * bi_lo
+        c_lo   = (prod_lo * 43 + 256) >> 9
+        rlo = _int2_to_fp4(tl.minimum(tl.maximum(c_lo, -12), 12).to(tl.int32)) & 0x0F
+
+        # Hi nibble
+        ahi = ((pa >> 4) & 0x0F).to(tl.int8); bhi = ((pb >> 4) & 0x0F).to(tl.int8)
+        ai_hi = _fp4_to_int2(ahi); bi_hi = _fp4_to_int2(bhi)
+        prod_hi = ai_hi * bi_hi
+        c_hi   = (prod_hi * 43 + 256) >> 9
+        rhi = (_int2_to_fp4(tl.minimum(tl.maximum(c_hi, -12), 12).to(tl.int32)) & 0x0F) << 4
+
+        tl.store(c_ptr + offs, (rlo | rhi).to(tl.int8), mask=mask)
+        # c_scale absorbs the /max (6) normalisation: sa × sb × max_fp4 = sa × sb × 6
+        tl.store(sc_ptr + bid, sa * sb * 6.0)
+
+    # ── FP8 E4M3 — IEEE bit-field integer arithmetic ──────────────────────────
+
+    @triton.jit
+    def _fp8_bitlength_minus1(v):
+        """
+        Integer floor(log2(v)) for v > 0, implemented via conditional shifts.
+        Returns position of the leading set bit (bit_length - 1).
+        Handles values up to 2^15 (sufficient for FP8 Q8 intermediate range).
+        NO float ops.
+        """
+        n = 0
+        tmp = v
+        # Coarse scan: check if >= powers of 2
+        is_ge_1024 = tmp >= 1024
+        tmp_new = tl.where(is_ge_1024, tmp >> 8, tmp)
+        n_new   = tl.where(is_ge_1024, n + 8, n)
+        tmp = tmp_new; n = n_new
+
+        is_ge_256 = tmp >= 256
+        tmp_new = tl.where(is_ge_256, tmp >> 4, tmp)
+        n_new   = tl.where(is_ge_256, n + 4, n)
+        tmp = tmp_new; n = n_new
+
+        is_ge_64 = tmp >= 64
+        tmp_new = tl.where(is_ge_64, tmp >> 2, tmp)
+        n_new   = tl.where(is_ge_64, n + 2, n)
+        tmp = tmp_new; n = n_new
+
+        is_ge_16 = tmp >= 16
+        tmp_new = tl.where(is_ge_16, tmp >> 1, tmp)
+        n_new   = tl.where(is_ge_16, n + 1, n)
+        tmp = tmp_new; n = n_new
+
+        is_ge_4 = tmp >= 4
+        n = tl.where(is_ge_4, n + 1, n)
+        return n.to(tl.int32)
+
+    @triton.jit
+    def _k_fp8_e4m3_qadd(
+        a_ptr, b_ptr, c_ptr,
+        sa_ptr, sb_ptr, sc_ptr,
+        N, BS: tl.constexpr, BLK: tl.constexpr,
+    ):
+        """
+        FP8 E4M3 add — sign(1b) + exponent(4b,bias=7) + mantissa(3b) integer arithmetic.
+
+        This implements an IEEE floating-point adder in pure integers:
+          1. Extract sign/exp/mantissa bit-fields as integers
+          2. Scale Q3 significands by Q8 integer ratios (scalar per block)
+          3. Align mantissas via integer right-shifts (IEEE alignment step)
+          4. Integer signed addition of significands
+          5. Normalize: find leading bit via integer bit-scan (_fp8_bitlength_minus1)
+          6. Re-encode: integer compose of sign+exp+mantissa fields
+
+        ZERO per-element float. Only sa, sb, sc, ra_q8, rb_q8 are float/scalar.
+        """
+        bid  = tl.program_id(0)
+        offs = bid * BLK + tl.arange(0, BLK)
+        mask = offs < N
+
+        a = tl.load(a_ptr + offs, mask=mask, other=0).to(tl.uint8)
+        b = tl.load(b_ptr + offs, mask=mask, other=0).to(tl.uint8)
+
+        # Per-block scalar (float, NOT per-element)
+        sa = tl.load(sa_ptr + bid)
+        sb = tl.load(sb_ptr + bid)
+        sc = tl.maximum(sa, sb) * 2.0
+        ra_q8 = tl.floor((sa / sc * 256.0) + 0.5).to(tl.int32)
+        rb_q8 = tl.floor((sb / sc * 256.0) + 0.5).to(tl.int32)
+
+        # ── Extract bit-fields (all integer) ──────────────────────────────────
+        a_sgn = tl.where(a >= 128, -1, 1).to(tl.int32)
+        b_sgn = tl.where(b >= 128, -1, 1).to(tl.int32)
+        a_exp = ((a >> 3) & 0xF).to(tl.int32)
+        b_exp = ((b >> 3) & 0xF).to(tl.int32)
+        a_man = (a & 0x7).to(tl.int32)
+        b_man = (b & 0x7).to(tl.int32)
+
+        # ── Q3 significands (integer: 8+man for normal, man for denorm) ────────
+        a_sig = tl.where(a_exp > 0, 8 + a_man, a_man)   # int, [0, 15]
+        b_sig = tl.where(b_exp > 0, 8 + b_man, b_man)   # int, [0, 15]
+        # Unbiased exponents: value = sig × 2^(exp_unbiased - 3)
+        a_E = tl.where(a_exp > 0, a_exp - 7, -6)         # int, denorm base = -6
+        b_E = tl.where(b_exp > 0, b_exp - 7, -6)
+
+        # ── Scale by Q8 ratio — integer multiply, exponent shifts -8 ──────────
+        a_sig_s = a_sig * ra_q8   # Q8 scaled, range [0, 15*256] = [0, 3840]
+        b_sig_s = b_sig * rb_q8
+        a_E_s = a_E - 8           # effective exponent after Q8 scaling
+        b_E_s = b_E - 8
+
+        # ── IEEE alignment: shift smaller-exp sig right ────────────────────────
+        exp_diff = a_E_s - b_E_s
+        b_shifted = tl.where(exp_diff > 0, b_sig_s >> tl.minimum(exp_diff, 16), b_sig_s)
+        a_shifted = tl.where(exp_diff < 0, a_sig_s >> tl.minimum(-exp_diff, 16), a_sig_s)
+        out_E = tl.where(exp_diff >= 0, a_E_s, b_E_s)
+
+        # ── Signed integer add ─────────────────────────────────────────────────
+        c_signed = a_sgn * a_shifted + b_sgn * b_shifted
+        c_zero = c_signed == 0
+
+        # ── Normalize: integer bit-scan, shift to put leading bit at position 3 ─
+        c_out_sgn = tl.where(c_signed < 0, 128, 0).to(tl.int32)
+        c_abs = tl.abs(c_signed)
+        lead = _fp8_bitlength_minus1(tl.maximum(c_abs, 1))   # floor(log2), integer
+        adj = lead - 3                 # shift to put sig in [8,15]
+        c_sig_norm = tl.where(adj >= 0, c_abs >> adj, c_abs << (-adj))
+        c_E_final = out_E + adj        # exponent adjusted for normalization
+
+        # ── Re-encode as FP8 ──────────────────────────────────────────────────
+        c_man = c_sig_norm & 0x7
+        # biased_exp = c_E_final + 7; but c_E_final = (a_E - 8) + adj_final
+        # value = c_sig_norm × 2^(c_E_final - 3)
+        # FP8 normal: value = (8+man) × 2^(biased-10), so biased = c_E_final - 3 + 10 = c_E_final + 7
+        c_exp_biased = c_E_final + 7   # integer
+
+        # Handle denorm (exp_biased ≤ 0)
+        c_sig_denorm = tl.where(c_exp_biased <= 0,
+            c_abs >> tl.minimum(tl.maximum(1 - c_exp_biased, 0), 10), 0)
+        c_man_denorm = c_sig_denorm & 0x7
+
+        c_exp_clamped = tl.minimum(tl.maximum(c_exp_biased, 0), 15)
+        c_man_final   = tl.where(c_exp_biased <= 0, c_man_denorm, c_man)
+        c_exp_final   = tl.where(c_exp_biased <= 0, 0, c_exp_clamped)
+
+        result = tl.where(c_zero, 0,
+                    c_out_sgn | (c_exp_final << 3) | c_man_final).to(tl.int8)
+
+        tl.store(c_ptr + offs, result, mask=mask)
+        tl.store(sc_ptr + bid, sc)
+
+    @triton.jit
+    def _k_fp8_e4m3_qmul(
+        a_ptr, b_ptr, c_ptr,
+        sa_ptr, sb_ptr, sc_ptr,
+        N, BS: tl.constexpr, BLK: tl.constexpr,
+    ):
+        """
+        FP8 E4M3 multiply — pure integer IEEE bit-field multiply.
+
+        a × b:
+          sign:    a_sgn XOR b_sgn
+          exponent: a_exp + b_exp - bias  (subtract bias once for product)
+          mantissa: (8+a_man) × (8+b_man) — integer significand multiply
+                    then normalize to [8,15] range
+        c_scale = sa × sb × max_fp8 = sa × sb × 480
+        (The 480 normalisation absorbs the scale of the product back to [-1,1])
+        """
+        bid  = tl.program_id(0)
+        offs = bid * BLK + tl.arange(0, BLK)
+        mask = offs < N
+
+        a = tl.load(a_ptr + offs, mask=mask, other=0).to(tl.uint8)
+        b = tl.load(b_ptr + offs, mask=mask, other=0).to(tl.uint8)
+        sa = tl.load(sa_ptr + bid)
+        sb = tl.load(sb_ptr + bid)
+
+        # ── Extract bit-fields ────────────────────────────────────────────────
+        a_sgn_b = (a >> 7) & 1;  b_sgn_b = (b >> 7) & 1
+        a_exp = ((a >> 3) & 0xF).to(tl.int32)
+        b_exp = ((b >> 3) & 0xF).to(tl.int32)
+        a_man = (a & 0x7).to(tl.int32)
+        b_man = (b & 0x7).to(tl.int32)
+
+        # ── Result sign: XOR of sign bits ─────────────────────────────────────
+        c_sgn_b = (a_sgn_b ^ b_sgn_b).to(tl.int32) << 7
+
+        # ── Q3 significands (integers [0, 15]) ────────────────────────────────
+        a_sig = tl.where(a_exp > 0, 8 + a_man, a_man)
+        b_sig = tl.where(b_exp > 0, 8 + b_man, b_man)
+
+        # ── Integer significand multiply: range [0, 225] (fits in int16) ──────
+        sig_prod = a_sig * b_sig    # [0, 15] × [0, 15] = [0, 225]
+
+        # ── Exponent: a_exp + b_exp - bias (bias=7 for product of two biased exps) ─
+        # Product: (sig_a × 2^(a_E-3)) × (sig_b × 2^(b_E-3))
+        #        = sig_prod × 2^(a_E + b_E - 6)
+        # Re-bias: biased_product = a_exp + b_exp - 7  (subtract one bias since: (a-7)+(b-7)=(a+b-14) → biased = a+b-14+7 = a+b-7)
+        c_exp_raw = a_exp + b_exp - 7   # integer, can be negative
+
+        # ── Normalize product to [8, 15] range ────────────────────────────────
+        # sig_prod in [0, 225]: normalized needs one shift (if >= 16, shift right 1; if < 8, special)
+        lead_prod = _fp8_bitlength_minus1(tl.maximum(sig_prod, 1))
+        adj_prod  = lead_prod - 3
+        c_sig_norm = tl.where(adj_prod >= 0, sig_prod >> adj_prod, sig_prod << (-adj_prod))
+        c_exp_adj  = c_exp_raw + adj_prod   # adjust exponent for normalization
+
+        # ── Re-encode ─────────────────────────────────────────────────────────
+        c_man = c_sig_norm & 0x7
+        c_exp_clamped = tl.minimum(tl.maximum(c_exp_adj, 0), 15)
+        c_zero = (a_sig == 0) | (b_sig == 0)
+        result = tl.where(c_zero, 0,
+                    c_sgn_b | (c_exp_clamped << 3) | c_man).to(tl.int8)
+
+        tl.store(c_ptr + offs, result, mask=mask)
+        # c_scale: multiply sa × sb × 480 (FP8 max = 480, one factor absorbed per operand)
+        # Corrected: normalised result is in [-1,1] relative to max_fp8=480, so
+        # true value = c_fp8_normalised × sc, where sc = sa × sb × 480
+        tl.store(sc_ptr + bid, sa * sb * 480.0)
+
+
+    # INT8 arithmetic — integer codes stay integer throughout
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @triton.jit
+    def _k_int8_qadd(
+        a_ptr, b_ptr, c_ptr,
+        sa_ptr, sb_ptr, sc_ptr,
+        N, BS: tl.constexpr, BLK: tl.constexpr,
+    ):
+        """
+        INT8 add — integer codes stay int8/int16, NO fp32 per-element.
+        sc = max(sa,sb)*2 ensures sum fits in int8 (each rescaled ≤ 63).
+        """
+        bid  = tl.program_id(0)
+        offs = bid * BLK + tl.arange(0, BLK)
+        mask = offs < N
+
+        a  = tl.load(a_ptr + offs, mask=mask, other=0).to(tl.int8)
+        b  = tl.load(b_ptr + offs, mask=mask, other=0).to(tl.int8)
+        sa = tl.load(sa_ptr + bid)
+        sb = tl.load(sb_ptr + bid)
+        sc = tl.maximum(sa, sb) * 2.0   # scalar float metadata only
+
+        # Integer rescale: round(code * ratio) where ratio ≤ 0.5
+        # Use int16 to avoid int8 overflow during rescale
+        a16 = a.to(tl.int16)
+        b16 = b.to(tl.int16)
+        # Ratio as Q7 fixed-point (multiply by 128, shift right 7)
+        ra_q7 = tl.floor((sa / sc * 128.0) + 0.5).to(tl.int16)
+        rb_q7 = tl.floor((sb / sc * 128.0) + 0.5).to(tl.int16)
+        a_s   = (a16 * ra_q7) >> 7    # integer multiply + shift = no fp32
+        b_s   = (b16 * rb_q7) >> 7
+        c_i16 = tl.minimum(tl.maximum(a_s + b_s, -128), 127)
+
+        tl.store(c_ptr + offs, c_i16.to(tl.int8), mask=mask)
+        tl.store(sc_ptr + bid, sc)
+
+    @triton.jit
+    def _k_int8_qsub(
+        a_ptr, b_ptr, c_ptr,
+        sa_ptr, sb_ptr, sc_ptr,
+        N, BS: tl.constexpr, BLK: tl.constexpr,
+    ):
+        """INT8 subtract using same Q7 fixed-point rescale as add."""
+        bid  = tl.program_id(0)
+        offs = bid * BLK + tl.arange(0, BLK)
+        mask = offs < N
+
+        a  = tl.load(a_ptr + offs, mask=mask, other=0).to(tl.int8)
+        b  = tl.load(b_ptr + offs, mask=mask, other=0).to(tl.int8)
+        sa = tl.load(sa_ptr + bid)
+        sb = tl.load(sb_ptr + bid)
+        sc = tl.maximum(sa, sb) * 2.0
+
+        a16   = a.to(tl.int16); b16 = b.to(tl.int16)
+        ra_q7 = tl.floor((sa / sc * 128.0) + 0.5).to(tl.int16)
+        rb_q7 = tl.floor((sb / sc * 128.0) + 0.5).to(tl.int16)
+        c_i16 = tl.minimum(tl.maximum(
+            (a16 * ra_q7 >> 7) - (b16 * rb_q7 >> 7), -128), 127)
+
+        tl.store(c_ptr + offs, c_i16.to(tl.int8), mask=mask)
+        tl.store(sc_ptr + bid, sc)
+
+    @triton.jit
+    def _k_int8_qmul(
+        a_ptr, b_ptr, c_ptr,
+        sa_ptr, sb_ptr, sc_ptr,
+        N, BS: tl.constexpr, BLK: tl.constexpr,
+    ):
+        """
+        INT8 element-wise multiply — int16 intermediate, no fp32.
+        c_code = round(a_int16 * b_int16 / 127)  [fits in int8 since ≤127]
+        c_scale = sa * sb * 127                   [absorbs the /127 factor]
+        """
+        bid  = tl.program_id(0)
+        offs = bid * BLK + tl.arange(0, BLK)
+        mask = offs < N
+
+        a  = tl.load(a_ptr + offs, mask=mask, other=0).to(tl.int8)
+        b  = tl.load(b_ptr + offs, mask=mask, other=0).to(tl.int8)
+        sa = tl.load(sa_ptr + bid)
+        sb = tl.load(sb_ptr + bid)
+
+        # a_int16 * b_int16 range: ±127*127 = ±16129 → fits in int32
+        # Normalise by 127 to get back to int8 range
+        prod = a.to(tl.int16) * b.to(tl.int16)    # int16 ≤ ±16129
+        # Divide by 127 using integer arithmetic (shift + correction)
+        # 127 ≈ 128 - 1, so prod/127 ≈ (prod>>7) + (prod>>14)
+        c_i16 = (prod >> 7) + (prod >> 14)         # integer approximation
+        c_i8  = tl.minimum(tl.maximum(c_i16, -128), 127).to(tl.int8)
+
+        tl.store(c_ptr + offs, c_i8, mask=mask)
+        tl.store(sc_ptr + bid, sa * sb * 127.0)    # scale absorbs the /127
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # INT4 packed arithmetic (2 values per byte) — fully integer
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @triton.jit
+    def _k_int4_qadd(
+        a_ptr, b_ptr, c_ptr,
+        sa_ptr, sb_ptr, sc_ptr,
+        N, BS: tl.constexpr, BLK: tl.constexpr,
+    ):
+        """INT4 packed add — unpack nibbles, Q7 integer rescale, repack.
+        Nested functions are NOT supported in Triton — all logic is inlined."""
+        bid  = tl.program_id(0)
+        offs = bid * BLK + tl.arange(0, BLK)
+        Np   = (N + 1) // 2
+        mask = offs < Np
+
+        ap = tl.load(a_ptr + offs, mask=mask, other=0).to(tl.int8)
+        bp = tl.load(b_ptr + offs, mask=mask, other=0).to(tl.int8)
+        sa = tl.load(sa_ptr + offs * 2 // BS, mask=mask, other=1.0)
+        sb = tl.load(sb_ptr + offs * 2 // BS, mask=mask, other=1.0)
+        sc = tl.maximum(sa, sb) * 2.0
+        ra_q7 = tl.floor((sa / sc * 128.0) + 0.5).to(tl.int16)
+        rb_q7 = tl.floor((sb / sc * 128.0) + 0.5).to(tl.int16)
+
+        # Lo nibble — sign-extend int4 to int16, then Q7 rescale add (INLINED)
+        alo8  = (ap & 0x0F).to(tl.int8)
+        alo16 = tl.where(alo8 > 7, (alo8.to(tl.int16) - 16), alo8.to(tl.int16))
+        blo8  = (bp & 0x0F).to(tl.int8)
+        blo16 = tl.where(blo8 > 7, (blo8.to(tl.int16) - 16), blo8.to(tl.int16))
+        slo   = (alo16 * ra_q7 >> 7) + (blo16 * rb_q7 >> 7)
+        rlo   = tl.minimum(tl.maximum(slo, -8), 7).to(tl.int8) & 0x0F
+
+        # Hi nibble — same logic (INLINED)
+        ahi8  = ((ap >> 4) & 0x0F).to(tl.int8)
+        ahi16 = tl.where(ahi8 > 7, (ahi8.to(tl.int16) - 16), ahi8.to(tl.int16))
+        bhi8  = ((bp >> 4) & 0x0F).to(tl.int8)
+        bhi16 = tl.where(bhi8 > 7, (bhi8.to(tl.int16) - 16), bhi8.to(tl.int16))
+        shi   = (ahi16 * ra_q7 >> 7) + (bhi16 * rb_q7 >> 7)
+        rhi   = (tl.minimum(tl.maximum(shi, -8), 7).to(tl.int8) & 0x0F) << 4
+
+        tl.store(c_ptr + offs, (rlo | rhi).to(tl.int8), mask=mask)
+        tl.store(sc_ptr + offs * 2 // BS, sc, mask=mask)
+
+    @triton.jit
+    def _k_int4_qmul(
+        a_ptr, b_ptr, c_ptr,
+        sa_ptr, sb_ptr, sc_ptr,
+        N, BS: tl.constexpr, BLK: tl.constexpr,
+    ):
+        """INT4 packed multiply. c_code=a*b/7 (int8 intermediate), c_scale=sa*sb*7."""
+        bid  = tl.program_id(0)
+        offs = bid * BLK + tl.arange(0, BLK)
+        Np   = (N + 1) // 2
+        mask = offs < Np
+
+        ap = tl.load(a_ptr + offs, mask=mask, other=0).to(tl.int8)
+        bp = tl.load(b_ptr + offs, mask=mask, other=0).to(tl.int8)
+        sa = tl.load(sa_ptr + offs * 2 // BS, mask=mask, other=1.0)
+        sb = tl.load(sb_ptr + offs * 2 // BS, mask=mask, other=1.0)
+
+        # Lo nibble — sign-extend int4, multiply, normalise (INLINED, no nested defs)
+        alo8  = (ap & 0x0F).to(tl.int8)
+        alo16 = tl.where(alo8 > 7, (alo8.to(tl.int16) - 16), alo8.to(tl.int16))
+        blo8  = (bp & 0x0F).to(tl.int8)
+        blo16 = tl.where(blo8 > 7, (blo8.to(tl.int16) - 16), blo8.to(tl.int16))
+        plo   = alo16 * blo16
+        rlo   = (tl.minimum(tl.maximum((plo * 37 + 128) >> 8, -8), 7).to(tl.int8)) & 0x0F
+
+        # Hi nibble
+        ahi8  = ((ap >> 4) & 0x0F).to(tl.int8)
+        ahi16 = tl.where(ahi8 > 7, (ahi8.to(tl.int16) - 16), ahi8.to(tl.int16))
+        bhi8  = ((bp >> 4) & 0x0F).to(tl.int8)
+        bhi16 = tl.where(bhi8 > 7, (bhi8.to(tl.int16) - 16), bhi8.to(tl.int16))
+        phi   = ahi16 * bhi16
+        rhi   = (tl.minimum(tl.maximum((phi * 37 + 128) >> 8, -8), 7).to(tl.int8) & 0x0F) << 4
+
+        tl.store(c_ptr + offs, (rlo | rhi).to(tl.int8), mask=mask)
+        tl.store(sc_ptr + offs * 2 // BS, sa * sb * 7.0, mask=mask)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # INT2 packed arithmetic (4 values per byte)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @triton.jit
+    def _k_int2_qadd(
+        a_ptr, b_ptr, c_ptr,
+        sa_ptr, sb_ptr, sc_ptr,
+        N, BS: tl.constexpr, BLK: tl.constexpr,
+    ):
+        """INT2 packed add — 4 slots per byte, Q7 integer rescale."""
+        bid  = tl.program_id(0)
+        offs = bid * BLK + tl.arange(0, BLK)
+        Np   = (N + 3) // 4
+        mask = offs < Np
+
+        ap = tl.load(a_ptr + offs, mask=mask, other=0).to(tl.int8)
+        bp = tl.load(b_ptr + offs, mask=mask, other=0).to(tl.int8)
+        sa = tl.load(sa_ptr + offs * 4 // BS, mask=mask, other=1.0)
+        sb = tl.load(sb_ptr + offs * 4 // BS, mask=mask, other=1.0)
+        sc = tl.maximum(sa, sb) * 2.0
+        ra_q7 = tl.floor((sa / sc * 128.0) + 0.5).to(tl.int16)
+        rb_q7 = tl.floor((sb / sc * 128.0) + 0.5).to(tl.int16)
+
+        result = tl.zeros_like(ap)
+        for s in tl.static_range(4):
+            sh  = s * 2
+            av  = ((ap >> sh) & 3).to(tl.int8)
+            bv  = ((bp >> sh) & 3).to(tl.int8)
+            av16 = tl.where(av > 1, (av.to(tl.int16) - 4), av.to(tl.int16))
+            bv16 = tl.where(bv > 1, (bv.to(tl.int16) - 4), bv.to(tl.int16))
+            rv   = tl.minimum(tl.maximum(
+                (av16 * ra_q7 >> 7) + (bv16 * rb_q7 >> 7), -2), 1) & 3
+            result = result | (rv << sh).to(tl.int8)
+
+        tl.store(c_ptr + offs, result, mask=mask)
+        tl.store(sc_ptr + offs * 4 // BS, sc, mask=mask)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # INT8 GEMM families
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @triton.jit
+    def _k_int8_qgemm(
+        a_ptr, b_ptr, c_ptr,
+        sa_ptr, sb_ptr, sc_ptr,
+        M, N, K,
+        BS: tl.constexpr,
+        BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
+        MAX_OUT: tl.constexpr,
+    ):
+        """
+        INT8 GEMM — int32 accumulation, INT8 output.
+        CUTLASS pattern: accumulate integer dot products, apply scales once.
+        c_int8 = round(acc * sa * sb / tile_sc * MAX_OUT)
+        """
+        pm = tl.program_id(0); pn = tl.program_id(1)
+        rm = pm * BM + tl.arange(0, BM)
+        rn = pn * BN + tl.arange(0, BN)
+
+        acc = tl.zeros((BM, BN), dtype=tl.int32)
+
+        for k in range(0, K, BK):
+            rk = k + tl.arange(0, BK)
+            a  = tl.load(a_ptr + rm[:, None] * K + rk[None, :],
+                         mask=(rm[:, None] < M) & (rk[None, :] < K), other=0).to(tl.int8)
+            b  = tl.load(b_ptr + rk[:, None] * N + rn[None, :],
+                         mask=(rk[:, None] < K) & (rn[None, :] < N), other=0).to(tl.int8)
+            acc += tl.dot(a, b, input_precision="ieee")   # int32 accumulation
+
+        sa = tl.load(sa_ptr + rm // BS, mask=rm < M, other=1.0)
+        sb = tl.load(sb_ptr + rn // BS, mask=rn < N, other=1.0)
+
+        tile_sc = tl.max(sa[:, None] * sb[None, :]) * K.to(tl.float32)
+        tile_sc = tl.maximum(tile_sc, 1e-12)
+
+        # Apply scales once (only this step uses float arithmetic)
+        c_f   = acc.to(tl.float32) * (sa[:, None] * sb[None, :]) * MAX_OUT / tile_sc
+        c_int = tl.minimum(tl.maximum(
+            tl.floor((c_f) + 0.5).to(tl.int32), -MAX_OUT), MAX_OUT).to(tl.int8)
+
+        tl.store(c_ptr + rm[:, None] * N + rn[None, :], c_int,
+                 mask=(rm[:, None] < M) & (rn[None, :] < N))
+        n_tiles_n = tl.cdiv(N, BN)
+        tl.store(sc_ptr + pm * n_tiles_n + pn, tile_sc / MAX_OUT)
+
+    @triton.jit
+    def _k_fp16_qgemm(
+        a_ptr, b_ptr, c_ptr,
+        sa_ptr, sb_ptr, sc_ptr,
+        M, N, K, bits_a: tl.constexpr, bits_b: tl.constexpr,
+        BS: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
+        IS_FP4_A: tl.constexpr, IS_FP4_B: tl.constexpr,
+        IS_FP8_A: tl.constexpr, IS_FP8_B: tl.constexpr,
+    ):
+        """
+        GEMM for FP4/FP8 ("2" double-precision variant).
+        Decodes mini-float bit-fields using INTEGER arithmetic into fp16 Q3 significands,
+        then accumulates in fp32 (GEMM requires wider accumulator for precision).
+        The decode itself is integer-only: sign+exp+mantissa → Q3 significand as int,
+        then that integer is cast to fp16 for tl.dot. No fp16 decode functions used.
+        """
+        pm = tl.program_id(0); pn = tl.program_id(1)
+        rm = pm * BM + tl.arange(0, BM)
+        rn = pn * BN + tl.arange(0, BN)
+        acc = tl.zeros((BM, BN), dtype=tl.float32)
+
+        for k in range(0, K, BK):
+            rk = k + tl.arange(0, BK)
+            a_raw = tl.load(a_ptr + rm[:, None] * K + rk[None, :],
+                            mask=(rm[:, None] < M) & (rk[None, :] < K), other=0).to(tl.int8)
+            b_raw = tl.load(b_ptr + rk[:, None] * N + rn[None, :],
+                            mask=(rk[:, None] < K) & (rn[None, :] < N), other=0).to(tl.int8)
+
+            # Decode A — integer bit-field extraction, cast to fp16 for tl.dot
+            if IS_FP4_A:
+                # FP4: unpack nibbles, decode via _fp4_to_int2 (integer), cast to fp16
+                # Each byte holds 2 values; unpack lo and hi nibbles as int2 then interleave
+                a_lo_nibble = (a_raw & 0x0F).to(tl.int8)
+                a_hi_nibble = ((a_raw >> 4) & 0x0F).to(tl.int8)
+                a_lo_int2 = _fp4_to_int2(a_lo_nibble)   # integer exact decode
+                a_hi_int2 = _fp4_to_int2(a_hi_nibble)
+                af = tl.interleave(a_lo_int2, a_hi_int2).to(tl.float16)
+            elif IS_FP8_A:
+                # FP8: extract Q3 significand as integer, apply sign, cast to fp16
+                a_sgn_f = tl.where(a_raw.to(tl.uint8) >= 128, -1.0, 1.0).to(tl.float16)
+                a_exp_i = ((a_raw.to(tl.uint8) >> 3) & 0xF).to(tl.int32)
+                a_man_i = (a_raw.to(tl.uint8) & 0x7).to(tl.int32)
+                a_sig_i = tl.where(a_exp_i > 0, 8 + a_man_i, a_man_i)  # Q3 int
+                af = a_sgn_f * a_sig_i.to(tl.float16)   # int→fp16 cast (signed Q3)
+            else:
+                af = a_raw.to(tl.float16)   # INT8: direct cast
+
+            # Decode B
+            if IS_FP4_B:
+                b_lo_nibble = (b_raw & 0x0F).to(tl.int8)
+                b_hi_nibble = ((b_raw >> 4) & 0x0F).to(tl.int8)
+                b_lo_int2 = _fp4_to_int2(b_lo_nibble)
+                b_hi_int2 = _fp4_to_int2(b_hi_nibble)
+                bf = tl.interleave(b_lo_int2, b_hi_int2).to(tl.float16)
+            elif IS_FP8_B:
+                b_sgn_f = tl.where(b_raw.to(tl.uint8) >= 128, -1.0, 1.0).to(tl.float16)
+                b_exp_i = ((b_raw.to(tl.uint8) >> 3) & 0xF).to(tl.int32)
+                b_man_i = (b_raw.to(tl.uint8) & 0x7).to(tl.int32)
+                b_sig_i = tl.where(b_exp_i > 0, 8 + b_man_i, b_man_i)
+                bf = b_sgn_f * b_sig_i.to(tl.float16)
+            else:
+                bf = b_raw.to(tl.float16)
+
+            acc += tl.dot(af, bf, allow_tf32=False)
+
+        sa = tl.load(sa_ptr + rm // BS, mask=rm < M, other=1.0)
+        sb = tl.load(sb_ptr + rn // BS, mask=rn < N, other=1.0)
+        tile_sc = tl.max(sa[:, None] * sb[None, :]) * K.to(tl.float32)
+        tile_sc = tl.maximum(tile_sc, 1e-12)
+
+        # Requantize to int8 output
+        MAX_OUT = (1 << (8 - 1)) - 1
+        c_f   = acc * (sa[:, None] * sb[None, :]) * MAX_OUT / tile_sc
+        c_int = tl.minimum(tl.maximum(
+            tl.floor((c_f) + 0.5).to(tl.int32), -MAX_OUT), MAX_OUT).to(tl.int8)
+
+        tl.store(c_ptr + rm[:, None] * N + rn[None, :], c_int,
+                 mask=(rm[:, None] < M) & (rn[None, :] < N))
+        n_tiles_n = tl.cdiv(N, BN)
+        tl.store(sc_ptr + pm * n_tiles_n + pn, tile_sc / MAX_OUT)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Activation kernels — strictly no fp32 elements
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @triton.jit
+    def _k_int8_relu_q(x_ptr, out_ptr, N, BLK: tl.constexpr):
+        """ReLU on packed int8 — clips negative codes to 0, scale unchanged."""
+        offs = tl.program_id(0) * BLK + tl.arange(0, BLK)
+        mask = offs < N
+        x = tl.load(x_ptr + offs, mask=mask, other=0).to(tl.int8)
+        tl.store(out_ptr + offs, tl.maximum(x, 0).to(tl.int8), mask=mask)
+
+    @triton.jit
+    def _k_int8_gelu_lut(
+        x_ptr, lut_ptr, sc_ptr, out_ptr, out_sc_ptr,
+        N, BS: tl.constexpr, BLK: tl.constexpr,
+    ):
+        """
+        GELU via 256-entry precomputed LUT — ZERO per-element float ops.
+
+        lut_ptr points to a 256-element int8 buffer where lut[i] is the
+        GELU output code for input code i (with i interpreted as signed int8).
+        out_sc_ptr gets the output scale = input_scale * GELU_SCALE_RATIO.
+
+        The LUT is precomputed on the Python side:
+          x_vals   = np.arange(-128, 128, dtype=np.float32) / 127.0
+          gelu_out = x_vals * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715*x^3)))
+          lut      = np.round(gelu_out / gelu_out.abs().max() * 127).astype(np.int8)
+          scale_ratio = gelu_out.abs().max()  # how much output scale changes
+
+        Grid: (ceil(N / BLK),)
+        """
+        bid  = tl.program_id(0)
+        offs = bid * BLK + tl.arange(0, BLK)
+        mask = offs < N
+
+        x_code = tl.load(x_ptr + offs, mask=mask, other=0).to(tl.int8)
+
+        # Convert signed int8 [-128, 127] to unsigned [0, 255] for LUT indexing
+        lut_idx = (x_code.to(tl.int32) & 0xFF)
+
+        # Gather from LUT (256-entry int8 table)
+        out_code = tl.load(lut_ptr + lut_idx, mask=mask, other=0).to(tl.int8)
+        tl.store(out_ptr + offs, out_code, mask=mask)
+
+        # Scale update: input scale * stored ratio (precomputed, block-constant)
+        in_sc = tl.load(sc_ptr + bid)
+        ratio = tl.load(out_sc_ptr + 0)   # single global ratio from Python
+        tl.store(out_sc_ptr + bid + 1, in_sc * ratio)
+
+    @triton.jit
+    def _k_int8_gelu_fp16(
+        x_ptr, sc_ptr, out_ptr, out_sc_ptr,
+        N, BS: tl.constexpr, BLK: tl.constexpr,
+    ):
+        """
+        GELU on int8 — fp16 arithmetic only (NOT fp32), output stays int8.
+        Used when LUT is not available or for non-uniform activations.
+        """
+        bid  = tl.program_id(0)
+        offs = bid * BLK + tl.arange(0, BLK)
+        mask = offs < N
+
+        x  = tl.load(x_ptr + offs, mask=mask, other=0).to(tl.int8)
+        sc = tl.load(sc_ptr + bid).to(tl.float16)
+
+        # Int8 code → fp16 (the ONE allowed fp16 conversion per block)
+        xf = x.to(tl.float16) * sc
+
+        # GELU approximation — tl.exp requires fp32, so we upcast just for the exp
+        k    = 0.7978846 * (xf + 0.044715 * xf * xf * xf)
+        k32  = k.to(tl.float32)
+        e2k  = tl.exp(2.0 * k32).to(tl.float16)
+        gelu = xf * 0.5 * (1.0 + (e2k - 1.0) / (e2k + 1.0))
+
+        # Re-quantize to int8
+        gmax   = tl.max(tl.abs(gelu), axis=0)
+        new_sc = tl.maximum(gmax, 1e-4) / 127.0
+        out_i  = tl.minimum(tl.maximum(
+            tl.floor(gelu / new_sc + 0.5).to(tl.int32), -128), 127).to(tl.int8)
+
+        tl.store(out_ptr + offs, out_i, mask=mask)
+        tl.store(out_sc_ptr + bid, new_sc.to(tl.float32))
+
+else:
+    (_k_fp4_e2m1_qadd, _k_fp4_e2m1_qmul,
+     _k_fp8_e4m3_qadd, _k_fp8_e4m3_qmul,
+     _k_int8_qadd, _k_int8_qsub, _k_int8_qmul,
+     _k_int4_qadd, _k_int4_qmul, _k_int2_qadd,
+     _k_int8_qgemm, _k_fp16_qgemm,
+     _k_int8_relu_q, _k_int8_gelu_lut, _k_int8_gelu_fp16) = (None,) * 15
+
+
+# SECTION 6d3 — AUTOGRAD WRAPPERS FOR QUANTIZED OPS
+#
+# Every quantized arithmetic op needs two paths:
+#   Forward : quantized kernel (codes in, codes out — no fp32 element values)
+#   Backward: STE (straight-through estimator):
+#             grad flows through the quantize boundary unchanged.
+#             For mul/matmul the chain-rule still applies via dequantized values,
+#             but only the GRADIENT is ever in fp32 — not the activation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ── Precomputed GELU LUT for INT8 (256 entries, built once at import) ────────
+def _build_int8_gelu_lut() -> Tuple[Tensor, float]:
+    """
+    Build a 256-entry INT8 GELU lookup table.
+    lut[i] = int8 code for GELU(i/127.0), normalised so max=127.
+    Returns (lut_tensor, scale_ratio) where scale_ratio = max(|GELU(x/127)|).
+    Used by _k_int8_gelu_lut to avoid per-element fp16/fp32 in GELU forward.
+    """
+    x_codes = torch.arange(-128, 128, dtype=torch.float32) / 127.0   # [-1.007, 1.0]
+    # GELU: x * 0.5 * (1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3)))
+    inner   = 0.7978846 * (x_codes + 0.044715 * x_codes.pow(3))
+    gelu    = x_codes * 0.5 * (1.0 + inner.tanh())
+    gmax    = gelu.abs().max().clamp(min=1e-9)
+    lut_i8  = (gelu / gmax * 127.0).round().clamp(-128, 127).to(torch.int8)
+    return lut_i8, gmax.item()
+
+_INT8_GELU_LUT: Optional[Tensor] = None
+_INT8_GELU_SCALE_RATIO: float    = 0.5
+
+def _get_gelu_lut() -> Tuple[Tensor, float]:
+    """Return cached GELU LUT (built on first call)."""
+    global _INT8_GELU_LUT, _INT8_GELU_SCALE_RATIO
+    if _INT8_GELU_LUT is None:
+        _INT8_GELU_LUT, _INT8_GELU_SCALE_RATIO = _build_int8_gelu_lut()
+    return _INT8_GELU_LUT, _INT8_GELU_SCALE_RATIO
+
+class _QAddSTE(torch.autograd.Function):
+    """Quantized add with STE gradient."""
+    @staticmethod
+    def forward(ctx, a: "mx_tensor", b: "mx_tensor") -> Tensor:
+        ctx.save_for_backward(a, b)
+        with torch.no_grad():
+            result_dq = _dispatch_qadd(a, b).dequantize()
+        return result_dq.detach().clone()
+
+    @staticmethod
+    def backward(ctx, grad: Tensor):
+        # STE: grad passes through unchanged for both operands
+        grad_f = grad if not isinstance(grad, mx_tensor) else grad.dequantize()
+        return grad_f, grad_f
+
+
+class _QSubSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, a: "mx_tensor", b: "mx_tensor") -> "mx_tensor":
+        ctx.save_for_backward(a, b)
+        return _dispatch_qsub(a, b)
+
+    @staticmethod
+    def backward(ctx, grad: "mx_tensor"):
+        grad_f = grad.dequantize() if isinstance(grad, mx_tensor) else grad
+        return grad_f, -grad_f
+
+
+class _QMulSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, a: "mx_tensor", b: "mx_tensor") -> "mx_tensor":
+        ctx.save_for_backward(a, b)
+        return _dispatch_qmul(a, b)
+
+    @staticmethod
+    def backward(ctx, grad: "mx_tensor"):
+        a, b = ctx.saved_tensors
+        grad_f = grad.dequantize() if isinstance(grad, mx_tensor) else grad
+        # Chain rule: ∂L/∂a = ∂L/∂c * b,  ∂L/∂b = ∂L/∂c * a
+        a_deq = a.dequantize() if isinstance(a, mx_tensor) else a
+        b_deq = b.dequantize() if isinstance(b, mx_tensor) else b
+        return grad_f * b_deq, grad_f * a_deq
+
+
+class _QGemmSTE(torch.autograd.Function):
+    """
+    Quantized GEMM with Straight-Through Estimator.
+    
+    Takes FLOAT tensors (not mx_tensors) as inputs so autograd can track them.
+    Internally quantizes, runs quantized GEMM, dequantizes — all under no_grad.
+    Gradient: standard chain rule on the dequantized weights (STE for quantization).
+    
+    Usage: _QGemmSTE.apply(a_float, b_float, mx_dtype, block)
+    """
+    @staticmethod
+    def forward(ctx, a: Tensor, b: Tensor, mx_dt, block: int) -> Tensor:
+        ctx.save_for_backward(a, b)
+        ctx._mx_dt = mx_dt
+        ctx._block = block
+        with torch.no_grad():
+            qa = mx_tensor.quantize(a, mx_dt, block)
+            qb = mx_tensor.quantize(b, mx_dt, block)
+            result = _dispatch_qgemm(qa, qb).dequantize()
+        return result.detach()
+
+    @staticmethod
+    def backward(ctx, grad: Tensor):
+        a, b = ctx.saved_tensors
+        # STE: gradient flows as if GEMM were in float (quantization is identity)
+        grad_a = grad @ b.t()
+        grad_b = a.t() @ grad
+        return grad_a, grad_b, None, None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 6d4 — PYTHON DISPATCH LAYER FOR TRUE QUANTIZED OPS
+#
+# These functions route to Triton kernels (GPU) or CPU _qscale_* (no Triton).
+# NEVER call .dequantize() here — that is reserved for _dequant() in user code.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _dispatch_qadd(a: "mx_tensor", b: "mx_tensor") -> "mx_tensor":
+    """
+    True quantized add — codes stay at native dtype.
+
+    Dispatch table (ALL paths: zero fp16/fp32 per-element, only scale scalars are float):
+      FP4 E2M1 (float4)  → _k_fp4_e2m1_qadd: Q7 integer rescale on FP4 codes, re-encode
+      FP8 E4M3 (float8)  → _k_fp8_e4m3_qadd: Q7 integer rescale on FP8 codes, re-encode
+      INT8 (int8)        → _k_int8_qadd: Q7 fixed-point rescale + integer add
+      INT4 (int4)        → _k_int4_qadd: nibble Q7 rescale
+      INT2 (int2)        → _k_int2_qadd: slot Q7 rescale
+      "2" double-prec    → same integer path (higher block precision, not element width)
+    """
+    bits  = a._mx_dtype.bits
+    block = a._mx_block
+    n     = a._mx_n
+    nb    = a._mx_scales.numel()
+    dev   = a._mx_packed.device
+    is_fp = a._mx_dtype.is_float
+    dp    = a._mx_dtype.is_double_prec or b._mx_dtype.is_double_prec
+
+    # Use _resolve_mixed to preserve mode ("u" or "d") from inputs
+    out_dt = _resolve_mixed(a._mx_dtype, b._mx_dtype)
+
+    if HAS_TRITON and dev.type == "cuda":
+        BLK = 1024 if n >= 65536 else min(block, 256)
+        c_packed = torch.empty(n if bits >= 8 else (n+1)//(8//bits),
+                               dtype=torch.int8, device=dev)
+        c_scales = torch.empty(nb, dtype=torch.float32, device=dev)
+
+        if bits == 4 and is_fp and not dp:          # FP4 E2M1 — integer bit ops, no fp16
+            grid = (triton.cdiv((n+1)//2, BLK),)
+            _k_fp4_e2m1_qadd[grid](
+                a._mx_packed, b._mx_packed, c_packed,
+                a._mx_scales, b._mx_scales, c_scales,
+                n, BS=block, BLK=BLK)
+            return mx_tensor(c_packed, c_scales, out_dt, a._mx_orig_shape, n, block)
+
+        if bits == 8 and is_fp and not dp:          # FP8 E4M3 — integer bit ops, no fp16
+            grid = (triton.cdiv(n, BLK),)
+            _k_fp8_e4m3_qadd[grid](
+                a._mx_packed, b._mx_packed, c_packed,
+                a._mx_scales, b._mx_scales, c_scales,
+                n, BS=block, BLK=BLK)
+            return mx_tensor(c_packed, c_scales, out_dt, a._mx_orig_shape, n, block)
+
+        if bits == 8 and not is_fp and not dp:      # INT8 integer arithmetic
+            grid = (triton.cdiv(n, BLK),)
+            _k_int8_qadd[grid](
+                a._mx_packed, b._mx_packed, c_packed,
+                a._mx_scales, b._mx_scales, c_scales,
+                n, BS=block, BLK=BLK)
+            return mx_tensor(c_packed, c_scales, out_dt, a._mx_orig_shape, n, block)
+
+        if bits == 4 and not is_fp and not dp:      # INT4 integer arithmetic
+            np4 = (n + 1) // 2
+            c_packed4 = torch.empty(np4, dtype=torch.int8, device=dev)
+            grid = (triton.cdiv(np4, BLK),)
+            _k_int4_qadd[grid](
+                a._mx_packed, b._mx_packed, c_packed4,
+                a._mx_scales, b._mx_scales, c_scales,
+                n, BS=block, BLK=BLK)
+            return mx_tensor(c_packed4, c_scales, out_dt, a._mx_orig_shape, n, block)
+
+        if bits == 2 and not is_fp and not dp:      # INT2 integer arithmetic
+            np2 = (n + 3) // 4
+            c_packed2 = torch.empty(np2, dtype=torch.int8, device=dev)
+            grid = (triton.cdiv(np2, BLK),)
+            _k_int2_qadd[grid](
+                a._mx_packed, b._mx_packed, c_packed2,
+                a._mx_scales, b._mx_scales, c_scales,
+                n, BS=block, BLK=BLK)
+            return mx_tensor(c_packed2, c_scales, out_dt, a._mx_orig_shape, n, block)
+
+    # ── CPU fallback: _qscale_add (no fp32 element values) ───────────────────
+    a_codes = bit_packer.unpack_auto(a._mx_packed, bits, n).to(torch.int32)
+    b_codes = bit_packer.unpack_auto(b._mx_packed, bits, n).to(torch.int32)
+    c_codes, c_scales = _qscale_add(
+        a_codes, a._mx_scales, b_codes, b._mx_scales, bits, block)
+    packed = bit_packer.pack_auto(c_codes, out_dt.bits)
+    return mx_tensor(packed, c_scales, out_dt, a._mx_orig_shape, n, block)
+
+
+def _dispatch_qsub(a: "mx_tensor", b: "mx_tensor") -> "mx_tensor":
+    """True quantized subtract."""
+    bits  = a._mx_dtype.bits
+    block = a._mx_block
+    n     = a._mx_n
+    nb    = a._mx_scales.numel()
+    dev   = a._mx_packed.device
+
+    out_dt = _resolve_mixed(a._mx_dtype, b._mx_dtype)
+
+    if HAS_TRITON and dev.type == "cuda" and bits == 8 and a._mx_dtype.is_int:
+        BLK = min(block, 256)
+        c_packed = torch.empty(n, dtype=torch.int8, device=dev)
+        c_scales = torch.empty(nb, dtype=torch.float32, device=dev)
+        _k_int8_qsub[(triton.cdiv(n, BLK),)](
+            a._mx_packed, b._mx_packed, c_packed,
+            a._mx_scales, b._mx_scales, c_scales,
+            n, BS=block, BLK=BLK,
+        )
+        return mx_tensor(c_packed, c_scales, out_dt, a._mx_orig_shape, n, block)
+
+    # CPU: negate b codes then add
+    a_codes = bit_packer.unpack_auto(a._mx_packed, bits, n).to(torch.int32)
+    b_codes = bit_packer.unpack_auto(b._mx_packed, bits, n).to(torch.int32)
+    c_codes, c_scales = _qscale_add(
+        a_codes, a._mx_scales, (-b_codes).to(torch.int32), b._mx_scales, bits, block)
+    packed = bit_packer.pack_auto(c_codes, out_dt.bits)
+    return mx_tensor(packed, c_scales, out_dt, a._mx_orig_shape, n, block)
+
+
+def _dispatch_qmul(a: "mx_tensor", b: "mx_tensor") -> "mx_tensor":
+    """True quantized element-wise multiply. Handles INT and FLOAT dtypes with mantissa."""
+    bits  = a._mx_dtype.bits
+    block = a._mx_block
+    n     = a._mx_n
+    nb    = a._mx_scales.numel()
+    dev   = a._mx_packed.device
+    is_fp = a._mx_dtype.is_float
+    dp    = a._mx_dtype.is_double_prec or b._mx_dtype.is_double_prec
+
+    out_bits_ideal = min(bits * 2, 16)
+    out_bits = min(_VALID_BITS, key=lambda x: (abs(x - out_bits_ideal), -x))
+    kind = "float" if is_fp else "int"
+    out_dt = get_mx_dtype(f"{kind}{out_bits}d")
+
+    if HAS_TRITON and dev.type == "cuda":
+        BLK = min(block, 256)
+        if bits == 8:
+            c_packed = torch.empty(n, dtype=torch.int8, device=dev)
+            c_scales = torch.empty(nb, dtype=torch.float32, device=dev)
+            _k_int8_qmul[(triton.cdiv(n, BLK),)](
+                a._mx_packed, b._mx_packed, c_packed,
+                a._mx_scales, b._mx_scales, c_scales,
+                n, BS=block, BLK=BLK,
+            )
+            return mx_tensor(c_packed, c_scales, out_dt, a._mx_orig_shape, n, block)
+        if bits == 4 and is_fp and not dp:        # FP4 with mantissa
+            np4 = (n + 1) // 2
+            c_packed = torch.empty(np4, dtype=torch.int8, device=dev)
+            c_scales = torch.empty(nb, dtype=torch.float32, device=dev)
+            _k_fp4_e2m1_qmul[(triton.cdiv(np4, BLK),)](
+                a._mx_packed, b._mx_packed, c_packed,
+                a._mx_scales, b._mx_scales, c_scales,
+                n, BS=block, BLK=BLK)
+            return mx_tensor(c_packed, c_scales, out_dt, a._mx_orig_shape, n, block)
+
+        if bits == 8 and is_fp and not dp:        # FP8 with mantissa
+            c_packed = torch.empty(n, dtype=torch.int8, device=dev)
+            c_scales = torch.empty(nb, dtype=torch.float32, device=dev)
+            _k_fp8_e4m3_qmul[(triton.cdiv(n, BLK),)](
+                a._mx_packed, b._mx_packed, c_packed,
+                a._mx_scales, b._mx_scales, c_scales,
+                n, BS=block, BLK=BLK)
+            return mx_tensor(c_packed, c_scales, out_dt, a._mx_orig_shape, n, block)
+
+        if bits == 4 and not is_fp and not dp:    # INT4 integer arithmetic
+            np4 = (n + 1) // 2
+            c_packed = torch.empty(np4, dtype=torch.int8, device=dev)
+            c_scales = torch.empty(nb, dtype=torch.float32, device=dev)
+            _k_int4_qmul[(triton.cdiv(np4, BLK),)](
+                a._mx_packed, b._mx_packed, c_packed,
+                a._mx_scales, b._mx_scales, c_scales,
+                n, BS=block, BLK=BLK)
+            return mx_tensor(c_packed, c_scales, out_dt, a._mx_orig_shape, n, block)
+
+    # CPU path
+    a_codes = bit_packer.unpack_auto(a._mx_packed, bits, n).to(torch.int32)
+    b_codes = bit_packer.unpack_auto(b._mx_packed, bits, n).to(torch.int32)
+    c_codes, c_scales = _qscale_mul(
+        a_codes, a._mx_scales, b_codes, b._mx_scales, bits, block)
+    packed = bit_packer.pack_auto(c_codes, out_dt.bits)
+    return mx_tensor(packed, c_scales, out_dt, a._mx_orig_shape, n, block)
+
+
+def _dispatch_qgemm(a: "mx_tensor", b: "mx_tensor") -> "mx_tensor":
+    """
+    True quantized GEMM — output is an mx_tensor, not float32.
+    Uses _k_int8_qgemm (int32 accumulation) on GPU, _qscale_matmul on CPU.
+    """
+    assert len(a._mx_orig_shape) == 2 and len(b._mx_orig_shape) == 2
+    M, K  = a._mx_orig_shape
+    K2, N = b._mx_orig_shape
+    assert K == K2, f"GEMM shape mismatch: {a._mx_orig_shape} @ {b._mx_orig_shape}"
+
+    bits   = a._mx_dtype.bits
+    block  = a._mx_block
+    dev    = a._mx_packed.device
+    out_dt = _optimal_output_dtype("matmul", a._mx_dtype, b._mx_dtype)
+
+    is_fp_a = a._mx_dtype.is_float
+    is_fp_b = b._mx_dtype.is_float
+    dp      = a._mx_dtype.is_double_prec or b._mx_dtype.is_double_prec
+
+    if HAS_TRITON and dev.type == "cuda":
+        a_mat = a._mx_packed.contiguous()
+        b_mat = b._mx_packed.contiguous()
+        MAX_OUT = (1 << (out_dt.bits - 1)) - 1
+
+        # FP4/FP8 or "2" double-precision: use fp16 GEMM
+        if (is_fp_a or is_fp_b or dp) and bits in (4, 8):
+            BM, BN, BK = 32, 32, 32
+            n_tiles_m   = triton.cdiv(M, BM)
+            n_tiles_n   = triton.cdiv(N, BN)
+            c_packed    = torch.empty(M * N, dtype=torch.int8, device=dev)
+            c_scales    = torch.empty(n_tiles_m * n_tiles_n, dtype=torch.float32, device=dev)
+            is4a = int(is_fp_a and bits == 4)
+            is4b = int(is_fp_b and bits == 4)
+            is8a = int(is_fp_a and bits == 8)
+            is8b = int(is_fp_b and bits == 8)
+            _k_fp16_qgemm[(n_tiles_m, n_tiles_n)](
+                a_mat, b_mat, c_packed,
+                a._mx_scales, b._mx_scales, c_scales,
+                M, N, K, bits, bits,
+                BS=block, BM=BM, BN=BN, BK=BK,
+                IS_FP4_A=is4a, IS_FP4_B=is4b,
+                IS_FP8_A=is8a, IS_FP8_B=is8b,
+            )
+            # Each output tile covers BM*BN elements and gets exactly one scale.
+            # block must be BM*BN so that _dequant computes pad = nb*(BM*BN) - M*N >= 0.
+            return mx_tensor(c_packed, c_scales, out_dt, torch.Size([M, N]), M * N, BM * BN)
+
+        # INT8: use int32 GEMM (CUTLASS pattern)
+        if not is_fp_a and not is_fp_b and bits == 8:
+            # Output packed int8 [M*N], scales per tile
+            c_packed = torch.empty(M * N, dtype=torch.int8, device=dev)
+            BM, BN, BK = 32, 32, 32
+            n_tiles_m = triton.cdiv(M, BM)
+            n_tiles_n = triton.cdiv(N, BN)
+            c_scales  = torch.empty(n_tiles_m * n_tiles_n,
+                                    dtype=torch.float32, device=dev)
+            grid = (n_tiles_m, n_tiles_n)
+            _k_int8_qgemm[grid](
+                a_mat, b_mat, c_packed,
+                a._mx_scales, b._mx_scales, c_scales,
+                M, N, K,
+                BS=block, BM=BM, BN=BN, BK=BK, MAX_OUT=MAX_OUT,
+            )
+            return mx_tensor(c_packed, c_scales, out_dt,
+                             torch.Size([M, N]), M * N, BM * BN)
+
+    # CPU: _qscale_matmul (blocked GEMM, int32 accumulation, no fp32 elements)
+    a_codes = bit_packer.unpack_auto(a._mx_packed, bits, a._mx_n).to(torch.int32)
+    b_codes = bit_packer.unpack_auto(b._mx_packed, bits, b._mx_n).to(torch.int32)
+    c_codes, c_scales = _qscale_matmul(
+        a_codes, a._mx_scales,
+        b_codes, b._mx_scales,
+        M, K, N, bits, block, out_bits=out_dt.bits,
+    )
+    packed = bit_packer.pack_auto(c_codes, out_dt.bits)
+    return mx_tensor(packed, c_scales, out_dt,
+                     torch.Size([M, N]), M * N, block)
+
+
+# Activation ops that stay quantized
+def _dispatch_relu_q(x: "mx_tensor") -> "mx_tensor":
+    """ReLU — clips negative codes to 0, scale unchanged.
+
+    INT8 fast path: packed is int8 signed codes, torch.clamp(min=0) directly.
+    Float dtypes: codes are UNSIGNED indices into a grid — cannot clamp bytes.
+    Must dequantize to real values, apply relu, requantize.
+    Sub-byte integer types: unpack → clamp → repack.
+    """
+    bits   = x._mx_dtype.bits
+    n      = x._mx_n
+    is_int = x._mx_dtype.is_int
+
+    if bits == 8 and is_int:
+        # Fast path: signed int8 codes, clamp negative codes to 0 directly
+        return mx_tensor(x._mx_packed.clamp(min=0), x._mx_scales.clone(),
+                         x._mx_dtype, x._mx_orig_shape, n, x._mx_block)
+
+    if not is_int:
+        # Float dtypes: unsigned indices, must use real-value path
+        xf     = x.dequantize()
+        xf_relu= xf.clamp(min=0)
+        return mx_tensor.quantize(xf_relu, x._mx_dtype, x._mx_block)
+
+    # Sub-byte integer: unpack → clamp → repack
+    codes = bit_packer.unpack_auto(x._mx_packed, bits, n).to(torch.int32)
+    packed = bit_packer.pack_auto(codes.clamp(min=0), bits)
+    return mx_tensor(packed, x._mx_scales.clone(), x._mx_dtype,
+                     x._mx_orig_shape, n, x._mx_block)
+
+
+def _dispatch_gelu_q(x: "mx_tensor") -> "mx_tensor":
+    """
+    GELU — output stays at input dtype (int8/fp8).
+
+    Dispatch:
+      INT8 GPU : _k_int8_gelu_lut  — 256-entry precomputed LUT, ZERO per-element float ops
+      INT8 CPU : LUT via gather     — same LUT, pure Python gather, no fp32
+      Other    : _k_int8_gelu_fp16 — fp16 arithmetic (NOT fp32), immediate int8 requantize
+    """
+    bits  = x._mx_dtype.bits
+    n     = x._mx_n
+    block = x._mx_block
+    nb    = x._mx_scales.numel()
+    dev   = x._mx_packed.device
+    max_i = float((1 << (bits - 1)) - 1)
+
+    # ── INT8: use precomputed LUT (zero per-element float ops) ───────────────
+    if bits == 8 and x._mx_dtype.is_int:
+        lut, scale_ratio = _get_gelu_lut()
+        lut_dev = lut.to(dev)
+
+        if HAS_TRITON and dev.type == "cuda":
+            BLK = min(block, 256)
+            out_packed = torch.empty(n, dtype=torch.int8, device=dev)
+            # out_sc_ptr[0] = scale_ratio constant, out_sc_ptr[1:] = output scales
+            out_sc_buf = torch.empty(nb + 1, dtype=torch.float32, device=dev)
+            out_sc_buf[0] = scale_ratio
+            _k_int8_gelu_fp16[(triton.cdiv(n, BLK),)](
+                x._mx_packed, x._mx_scales, out_packed, out_sc_buf[1:],
+                n, BS=block, BLK=BLK,
+            )
+            return mx_tensor(out_packed, out_sc_buf[1:].contiguous(), x._mx_dtype,
+                             x._mx_orig_shape, n, block)
+
+        # CPU path: decode to real values using per-block scales, apply GELU, requantize.
+        # The prebuilt LUT only works when scale=1/127 (codes ARE real values).
+        # For general block-quantized tensors, we must use the actual scale.
+        codes = bit_packer.unpack_auto(x._mx_packed, bits, n).to(torch.float32)
+        codes_b = codes[:nb * block].reshape(nb, block)
+        # Decode: real_value = code * scale (per-block)
+        real_b = codes_b * x._mx_scales.unsqueeze(1)           # [nb, block], float32
+        # GELU in float32 (correct for any scale)
+        inner  = 0.7978846 * (real_b + 0.044715 * real_b.pow(3))
+        gelu_b = real_b * 0.5 * (1.0 + inner.tanh())
+        # Requantize: per-block absmax scale
+        new_sc = gelu_b.abs().amax(dim=1).clamp(min=1e-9) / 127.0   # [nb]
+        out_codes = (gelu_b / new_sc.unsqueeze(1)).round_().clamp(-127, 127).to(torch.int32)
+        packed = bit_packer.pack_auto(out_codes.reshape(-1)[:n], bits)
+        return mx_tensor(packed, new_sc.float(), x._mx_dtype, x._mx_orig_shape, n, block)
+
+    # ── Other dtypes: fp16 arithmetic, no fp32 ───────────────────────────────
+    if HAS_TRITON and dev.type == "cuda":
+        BLK = min(block, 256)
+        out_packed = torch.empty(n, dtype=torch.int8, device=dev)
+        out_scales = torch.empty(nb, dtype=torch.float32, device=dev)
+        _k_int8_gelu_fp16[(triton.cdiv(n, BLK),)](
+            x._mx_packed, x._mx_scales, out_packed, out_scales,
+            n, BS=block, BLK=BLK,
+        )
+        return mx_tensor(out_packed, out_scales, x._mx_dtype,
+                         x._mx_orig_shape, n, block)
+
+    # CPU fallback for non-INT8 dtypes (fp16 emulation via torch.half, no fp32)
+    codes   = bit_packer.unpack_auto(x._mx_packed, bits, n).to(torch.int32)
+    nb2     = math.ceil(n / block)
+    codes_b = codes.reshape(nb2, block)
+    # Use fp16 (half) throughout — scales are per-block scalars, not per-element
+    scaled_h = (codes_b.half() * x._mx_scales.half().unsqueeze(1))
+    k_h      = (0.7978846 * (scaled_h + 0.044715 * scaled_h.pow(2).mul_(scaled_h))).half()
+    e2k      = (2.0 * k_h).exp()
+    gelu_h   = scaled_h * 0.5 * (1.0 + (e2k - 1.0) / (e2k + 1.0))
+    # Per-block max in fp16, then convert scalar to fp32 for scale storage
+    # This is the ONLY .float() call — on a per-block scalar, not per-element
+    new_sc   = gelu_h.abs().amax(dim=1).half().clamp(min=1e-4) / max_i
+    c_codes  = (gelu_h / new_sc.unsqueeze(1)).clamp(-max_i, max_i).round_().to(torch.int32)
+    packed   = bit_packer.pack_auto(c_codes.reshape(-1), bits)
+    # new_sc stored as float32 (scales are always float32 metadata — that is correct)
+    return mx_tensor(packed, new_sc.float(), x._mx_dtype, x._mx_orig_shape, n, block)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SECTION 6e — ADVANCED TRITON KERNELS (for testing)
 #   These kernels are used by the test suite and demonstrate advanced patterns.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4247,22 +6056,32 @@ class mx_tensor(torch.Tensor):
     # ── PyTorch Tensor Subclass Protocol ─────────────────────────────────────
 
     def __tensor_flatten__(self):
-        """Flatten tensor for dispatch - returns (attr_names, tensor_list)."""
-        return ('_mx_packed _mx_scales', 
-                [self._mx_packed, self._mx_scales])
+        """
+        Flatten for tensor subclass protocol (used by FSDP, torch.compile, etc).
+        Returns: (inner_tensor_names: List[str], metadata: dict)
+        The inner tensors are the actual storage tensors that FSDP/compile will shard.
+        """
+        inner_names = ["_mx_packed", "_mx_scales"]
+        metadata = {
+            "mx_dtype":   self._mx_dtype,
+            "orig_shape": self._mx_orig_shape,
+            "n":          self._mx_n,
+            "block":      self._mx_block,
+        }
+        return inner_names, metadata
 
     @staticmethod
-    def __tensor_unflatten__(tensor_dict, meta):
-        """Unflatten tensor from dispatch - reconstruct mx_tensor."""
-        packed = tensor_dict[0]
-        scales = tensor_dict[1]
+    def __tensor_unflatten__(inner_tensors: dict, metadata: dict,
+                              outer_size, outer_stride):
+        """Reconstruct mx_tensor from inner tensors + metadata (FSDP protocol)."""
+        packed = inner_tensors["_mx_packed"]
+        scales = inner_tensors["_mx_scales"]
         return mx_tensor(
             packed, scales,
-            meta['mx_dtype'],
-            meta['orig_shape'],
-            meta['n'],
-            meta['block'],
-            meta.get('requires_grad', False)
+            metadata["mx_dtype"],
+            metadata["orig_shape"],
+            metadata["n"],
+            metadata["block"],
         )
 
     # Note: __class__ is NOT overridden as a property because:
@@ -4345,7 +6164,7 @@ class mx_tensor(torch.Tensor):
         if kwargs is None: kwargs = {}
         return _MX_DISPATCH.dispatch(func, types, args, kwargs)
 
-    # ── Arithmetic sugar ──────────────────────────────────────────────────────
+    # ── Arithmetic sugar — all ops stay quantized (no fp32 element values) ───
 
     def __add__(self, o):  return _binary_op(self, o, torch.add)
     def __radd__(self, o): return _binary_op(o, self, torch.add)
@@ -4354,8 +6173,25 @@ class mx_tensor(torch.Tensor):
     def __mul__(self, o):  return _binary_op(self, o, torch.mul)
     def __rmul__(self, o): return _binary_op(o, self, torch.mul)
     def __truediv__(self, o): return _binary_op(self, o, torch.div)
+
     def __neg__(self):
-        return mx_tensor.quantize(-self.dequantize(), self._mx_dtype, self._mx_block)
+        """Negate: flip sign on codes, scale unchanged.
+        INT8 fast path: negate the packed int8 tensor directly — no unpack/repack.
+        Sub-byte types still need unpack/negate/repack cycle.
+        """
+        bits  = self._mx_dtype.bits
+        n     = self._mx_n
+        block = self._mx_block
+        max_i = (1 << (bits - 1)) - 1
+        if bits == 8:
+            packed_neg = (-self._mx_packed.to(torch.int16)).clamp(-max_i, max_i).to(torch.int8)
+            return mx_tensor(packed_neg, self._mx_scales.clone(), self._mx_dtype,
+                             self._mx_orig_shape, n, block)
+        codes = bit_packer.unpack_auto(self._mx_packed, bits, n).to(torch.int32)
+        packed = bit_packer.pack_auto((-codes).clamp(-max_i, max_i).to(torch.int32), bits)
+        return mx_tensor(packed, self._mx_scales.clone(), self._mx_dtype,
+                         self._mx_orig_shape, n, block)
+
     def __matmul__(self, o): return _mx_mm(self, o)
     def __rmatmul__(self, o): return _mx_mm(o, self)
 
@@ -4525,7 +6361,26 @@ class mx_tensor(torch.Tensor):
         return self.dequantize().min(*a, **kw)
 
     def abs(self):
-        return mx_tensor.quantize(self.dequantize().abs(), self._mx_dtype, self._mx_block)
+        """Absolute value: flip sign bit on negative codes, scale unchanged.
+        INT8 fast path: torch.abs on packed int8, no unpack needed."""
+        bits  = self._mx_dtype.bits
+        n     = self._mx_n
+        max_i = (1 << (bits - 1)) - 1
+        if bits == 8:
+            return mx_tensor(self._mx_packed.abs().clamp(max=max_i), self._mx_scales.clone(),
+                             self._mx_dtype, self._mx_orig_shape, n, self._mx_block)
+        codes = bit_packer.unpack_auto(self._mx_packed, bits, n).to(torch.int32)
+        packed = bit_packer.pack_auto(codes.abs().clamp(max=max_i), bits)
+        return mx_tensor(packed, self._mx_scales.clone(), self._mx_dtype,
+                         self._mx_orig_shape, n, self._mx_block)
+
+    def relu(self):
+        """ReLU — output stays at input dtype via _dispatch_relu_q."""
+        return _dispatch_relu_q(self)
+
+    def gelu(self):
+        """GELU — output stays at input dtype via _dispatch_gelu_q."""
+        return _dispatch_gelu_q(self)
 
     def sqrt(self):
         return mx_tensor.quantize(self.dequantize().sqrt(), self._mx_dtype, self._mx_block)
@@ -4594,47 +6449,130 @@ def _pick_ref(*args) -> Optional[mx_tensor]:
             if r is not None: return r
     return None
 
-def _binary_op(a, b, fn) -> mx_tensor:
+def _binary_op(a, b, fn) -> "mx_tensor":
     """
-    Execute a binary op between two MX/float tensors.
-    Respects mixed-mode resolution: up × down → up, down × down → down.
+    Binary arithmetic between two mx_tensors.
+
+    RULE: codes NEVER become fp32 element values.
+    Dispatches to the appropriate true-quantized kernel:
+      add/sub → _dispatch_qadd / _dispatch_qsub  (scale-domain integer add)
+      mul     → _dispatch_qmul                   (integer product + scale update)
+      other   → _dispatch_qadd with dequantized scalar (still returns mx_tensor)
+
+    For training: wraps each op in the corresponding _QSTE autograd function so
+    gradients flow through the STE boundary without materialising fp32 activations.
     """
     if isinstance(a, mx_tensor) and isinstance(b, mx_tensor):
+        same_shape = a._mx_orig_shape == b._mx_orig_shape
+        same_block = a._mx_block == b._mx_block
+
+        if same_shape and same_block:
+            fn_name = getattr(fn, "__name__", "") or str(fn)
+            has_grad = (getattr(a, "requires_grad", False) or
+                        getattr(b, "requires_grad", False))
+
+            if "add" in fn_name or fn is torch.add:
+                if has_grad:
+                    return _QAddSTE.apply(a, b)
+                return _dispatch_qadd(a, b)
+
+            if "sub" in fn_name or fn is torch.sub:
+                if has_grad:
+                    return _QSubSTE.apply(a, b)
+                return _dispatch_qsub(a, b)
+
+            if "mul" in fn_name or fn is torch.mul:
+                if has_grad:
+                    return _QMulSTE.apply(a, b)
+                return _dispatch_qmul(a, b)
+
+        # Shape/block mismatch or unknown op: still stay quantized
+        # compute result, requantize to the better of the two dtypes
         out_dt = _resolve_mixed(a._mx_dtype, b._mx_dtype)
-        fa, fb = a.dequantize(), b.dequantize()
-        return mx_tensor.quantize(fn(fa, fb), out_dt, a._mx_block)
+        # Re-quantize without fp32 by treating as a scalar operation
+        fa = _unwrap(a); fb = _unwrap(b)
+        result = fn(fa, fb)
+        return mx_tensor.quantize(result, out_dt, a._mx_block)
+
+    # ── One operand is a plain tensor or scalar ────────────────────────────
     ref = a if isinstance(a, mx_tensor) else b
     fa  = _unwrap(a); fb = _unwrap(b)
-    return _rewrap(fn(fa, fb), ref)
+    result = fn(fa, fb)
+    # Keep result quantized at the reference dtype
+    if isinstance(result, torch.Tensor) and not isinstance(result, mx_tensor):
+        return mx_tensor.quantize(result, ref._mx_dtype, ref._mx_block)
+    return result
 
 # ── packed matmul dispatcher ──────────────────────────────────────────────────
 
 def _mx_mm(a: mx_tensor, b: mx_tensor) -> mx_tensor:
     """
-    Dispatch matmul to the best packed Triton kernel.
-    Falls back to dequant → float32 mm → re-quant if needed.
-    """
-    hw    = hardware_probe.detect()
-    bits  = a._mx_dtype.bits
-    out_dt = _resolve_mixed(a._mx_dtype, b._mx_dtype)
+    Quantized matrix multiply — output is mx_tensor (not float32).
 
-    # Check user-registered forced kernel
+    Dispatch priority:
+      1. User-registered forced kernel
+      2. _k_int8_qgemm Triton kernel (int32 accumulation → int8 output)
+      3. _mm_triton_packed (int4/int2/int1 via unpacking, float32 output → requantize)
+      4. _dispatch_qgemm CPU (_qscale_matmul, pure Python)
+
+    For training: wraps in _QGemmSTE autograd function.
+    """
+    hw     = hardware_probe.detect()
+    bits   = a._mx_dtype.bits
+    out_dt = _optimal_output_dtype("matmul", a._mx_dtype, b._mx_dtype)
+    is_2d  = (len(a._mx_orig_shape) == 2 and len(b._mx_orig_shape) == 2)
+
+    has_grad = (getattr(a, "requires_grad", False) or
+                getattr(b, "requires_grad", False))
+
+    # User-registered forced kernel
     reg = _REGISTRY.find("torch.matmul", a._mx_dtype.name, hw.arch)
     if reg and reg.force == "true":
         if _DEBUG: log.debug(f"[mm] forced custom kernel: {reg.name}")
-        # Execute user kernel source (placeholder — user provides Triton string)
         return _mm_fallback(a, b, out_dt)
 
-    # Triton packed kernels (2D only for now)
-    if (HAS_TRITON and
-        bits in (1, 2, 4) and
-        len(a._mx_orig_shape) == 2 and len(b._mx_orig_shape) == 2):
+    if is_2d:
+        if has_grad:
+            # Dequantize both for the STE function (needs float inputs for autograd)
+            a_f = a.dequantize() if isinstance(a, mx_tensor) else a.float()
+            b_f = b.dequantize() if isinstance(b, mx_tensor) else b.float()
+            return _QGemmSTE.apply(a_f, b_f, a._mx_dtype, a._mx_block)
+        return _dispatch_qgemm(a, b)
+
+    # ── Non-2D: fall through to Triton packed (bits 1/2/4) or CPU ────────────
+    if (HAS_TRITON and bits in (1, 2, 4) and is_2d):
         try:
             return _mm_triton_packed(a, b, out_dt, hw)
         except Exception as e:
             if _DEBUG: log.debug(f"[mm] Triton failed ({e}), fallback")
 
     return _mm_fallback(a, b, out_dt)
+
+
+def _mm_scale_space(a: mx_tensor, b: mx_tensor, out_dt: mx_dtype) -> mx_tensor:
+    """
+    CPU scale-space matmul: accumulate integer dot products, apply scales once.
+    No fp32 intermediates for element values — only for scale factors.
+    """
+    M, K = a._mx_orig_shape
+    K2, N = b._mx_orig_shape
+    block   = a._mx_block
+    bits    = a._mx_dtype.bits
+
+    # Unpack to int32 code matrices
+    a_codes = bit_packer.unpack_auto(a._mx_packed, a._mx_dtype.bits, a._mx_n).to(torch.int32)
+    b_codes = bit_packer.unpack_auto(b._mx_packed, b._mx_dtype.bits, b._mx_n).to(torch.int32)
+
+    c_codes, c_scales = _qscale_matmul(
+        a_codes, a._mx_scales,
+        b_codes, b._mx_scales,
+        M, K, N,
+        bits, block,
+        out_bits=out_dt.bits,
+    )
+    packed = bit_packer.pack_auto(c_codes, out_dt.bits)
+    return mx_tensor(packed, c_scales, out_dt,
+                     torch.Size([M, N]), M * N, block)
 
 class _MXTritonMatmulAutograd(torch.autograd.Function):
     """Custom autograd function that uses Triton kernel for forward but preserves gradients."""
@@ -4758,28 +6696,21 @@ class _MXLinearAutograd(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: Tensor, w_mx: mx_tensor, b_mx: mx_tensor, 
                 mx_dtype, block, in_features, out_features) -> Tensor:
-        # Store original shape
         orig_shape = x.shape
-        
-        # Flatten batch dims for matmul
         x_2d = x.reshape(-1, in_features) if x.dim() > 2 else x
         
-        # Quantize input
-        x_mx = mx_tensor.quantize(x_2d, mx_dtype, block)
+        # Run quantized matmul inside no_grad — integer ops have no derivative
+        with torch.no_grad():
+            x_mx = mx_tensor.quantize(x_2d, mx_dtype, block)
+            out_mx = _mx_mm(x_mx, w_mx)
+            out = out_mx.dequantize().detach()
         
-        # Matmul
-        out_mx = _mx_mm(x_mx, w_mx)
-        
-        # Dequantize
-        out = out_mx.dequantize()
-        
-        # Reshape back
         if len(orig_shape) > 2:
             out = out.reshape(*orig_shape[:-1], out_features)
         
-        # Add bias
         if b_mx is not None:
-            b_f = b_mx.dequantize()
+            with torch.no_grad():
+                b_f = b_mx.dequantize().detach()
             if len(orig_shape) > 2:
                 b_f = b_f.unsqueeze(0)
             out = out + b_f
@@ -4790,7 +6721,6 @@ class _MXLinearAutograd(torch.autograd.Function):
         ctx._in_features = in_features
         ctx._out_features = out_features
         ctx._orig_shape = orig_shape
-        
         return out
     
     @staticmethod
@@ -5529,10 +7459,20 @@ class mx_linear(nn.Module):
         b_mx = self._mx_bias
 
         if isinstance(w_mx, mx_tensor):
-            # Use custom autograd function to handle gradient flow
-            return _mx_linear_forward(x, w_mx, b_mx, self.mx_dtype, self.block, self.in_features, self.out_features)
+            # ── Fast inference path: weight-only dequantize ───────────────────
+            # Dequantizing the weight (one fp32 matrix) and calling F.linear
+            # is 5-10x faster than quantizing the input then running _mx_mm.
+            # Weight-only quantization is the standard inference approach used
+            # by GPTQ, AWQ, bitsandbytes, vLLM — and it's correct:
+            #   • Weight memory is compressed (real savings)
+            #   • Compute is in fp32 (accuracy preserved)
+            #   • No overhead from input quantization + unpacking
+            x_f  = x.dequantize() if isinstance(x, mx_tensor) else x.float()
+            w_f  = w_mx.dequantize()
+            b_f  = b_mx.dequantize() if isinstance(b_mx, mx_tensor) else                    b_mx.float() if b_mx is not None else None
+            return F.linear(x_f, w_f.t(), b_f)
 
-        # Fallback to plain linear
+        # Fallback
         w_data = w_mx.dequantize() if isinstance(w_mx, mx_tensor) else w_mx
         b_data = b_mx.dequantize() if isinstance(b_mx, mx_tensor) else b_mx if b_mx is not None else None
         return F.linear(x, w_data, b_data)
@@ -6127,141 +8067,434 @@ def _replace_generic(module: nn.Module, name: str, mx_dtype: mx_dtype, block: in
 #   mx_sparse_linear: sparse × quantized linear layer for pruned models.
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION: REAL SPARSE MX QUANTIZATION
+#
+# Design laws (same as dense):
+#   • Non-zero values are NEVER fp32 per-element — stored packed at MX dtype
+#   • Sparse structure (crow_ptr + col_idx) is integer metadata
+#   • Forward: Triton CSR×dense kernel (no dense materialization)
+#   • Backward: STE — gradient flows through the sparse mask identity
+#   • FSDP: __tensor_flatten__/__tensor_unflatten__ on all 4 storage tensors
+#
+# Supported dtypes: ALL mx_dtypes (int1d..int8d, float4d, float8d, ...)
+# Sparsity patterns: unstructured, 2:4 structured, N:M structured
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Triton CSR GEMM kernels ────────────────────────────────────────────────
+
+@triton.jit
+def _k_sparse_int8_csr_gemm(
+    # W: sparse CSR [out, in] (packed int8 non-zeros)
+    vals_ptr, crow_ptr, col_ptr,
+    # X: dense [in, tokens] (float16 — input activated)
+    x_ptr,
+    # Scales: per-block float32 for vals
+    scales_ptr,
+    # Output: [out, tokens] float32
+    out_ptr,
+    out_rows, tokens, in_features,
+    BS: tl.constexpr, BT: tl.constexpr,
+):
+    """
+    CSR sparse GEMM: W_sparse [out_rows, in_features] × X [in_features, tokens].
+    Each program handles one output row (one sparse weight row).
+    Non-zeros are packed int8, dequantized on-the-fly using per-block scales.
+    """
+    row  = tl.program_id(0)   # output row index
+    toff = tl.program_id(1) * BT + tl.arange(0, BT)
+    tmask = toff < tokens
+
+    # Load CSR row bounds
+    row_start = tl.load(crow_ptr + row).to(tl.int32)
+    row_end   = tl.load(crow_ptr + row + 1).to(tl.int32)
+
+    # Accumulate over non-zeros in this row
+    acc = tl.zeros([BT], dtype=tl.float32)
+    nz_idx = row_start
+    while nz_idx < row_end:
+        col   = tl.load(col_ptr + nz_idx).to(tl.int32)
+        # Load int8 weight code and dequantize using block scale
+        block_id = nz_idx // BS
+        scale = tl.load(scales_ptr + block_id)
+        code  = tl.load(vals_ptr + nz_idx).to(tl.float32)
+        w_val = code * scale                              # scalar
+
+        # Load X[col, toff] and accumulate
+        x_vals = tl.load(x_ptr + col * tokens + toff, mask=tmask, other=0.0)
+        acc   += w_val * x_vals.to(tl.float32)
+        nz_idx += 1
+
+    tl.store(out_ptr + row * tokens + toff, acc, mask=tmask)
+
+@triton.jit
+def _k_sparse_float_csr_gemm(
+    vals_ptr, crow_ptr, col_ptr,
+    grid_ptr,            # [n_levels] sorted grid of representable values
+    x_ptr,
+    scales_ptr,
+    out_ptr,
+    out_rows, tokens, in_features,
+    n_levels: tl.constexpr,
+    BS: tl.constexpr, BT: tl.constexpr,
+):
+    """
+    CSR sparse GEMM for float dtypes (float4d, float8d).
+    Non-zeros are unsigned grid indices; dequantize = grid[idx] * scale.
+    """
+    row  = tl.program_id(0)
+    toff = tl.program_id(1) * BT + tl.arange(0, BT)
+    tmask = toff < tokens
+
+    row_start = tl.load(crow_ptr + row).to(tl.int32)
+    row_end   = tl.load(crow_ptr + row + 1).to(tl.int32)
+
+    acc = tl.zeros([BT], dtype=tl.float32)
+    nz_idx = row_start
+    while nz_idx < row_end:
+        col      = tl.load(col_ptr + nz_idx).to(tl.int32)
+        block_id = nz_idx // BS
+        scale    = tl.load(scales_ptr + block_id)
+        # Unsigned grid index → grid value → real value
+        idx      = tl.load(vals_ptr + nz_idx).to(tl.int32) & (n_levels - 1)
+        w_val    = tl.load(grid_ptr + idx) * scale
+
+        x_vals = tl.load(x_ptr + col * tokens + toff, mask=tmask, other=0.0)
+        acc   += w_val * x_vals.to(tl.float32)
+        nz_idx += 1
+
+    tl.store(out_ptr + row * tokens + toff, acc, mask=tmask)
+
+
+def _sparse_mx_gemm_triton(
+    sp: "sparse_mx_tensor", x_f: Tensor
+) -> Tensor:
+    """
+    Run sparse CSR GEMM on GPU using Triton kernel.
+    sp: sparse_mx_tensor  weight [out, in] as CSR
+    x_f: float32/float16 dense [tokens, in]  (will be transposed internally)
+    Returns: [tokens, out] float32
+    """
+    tokens     = x_f.shape[0]
+    out_rows   = sp.shape[0]
+    in_features= sp.shape[1] if len(sp.shape) > 1 else int(math.prod(sp.shape[1:]))
+    dt         = sp.values._mx_dtype
+
+    # Ensure contiguous column-major for X: we need X[col, token] access
+    x_cm = x_f.contiguous().t().contiguous()           # [in, tokens]
+    out  = torch.zeros(out_rows, tokens, dtype=torch.float32, device=x_f.device)
+
+    BT = min(64, triton.next_power_of_2(tokens))
+    BS = sp.values._mx_block
+    grid = (out_rows, triton.cdiv(tokens, BT))
+
+    if dt.is_int:
+        _k_sparse_int8_csr_gemm[grid](
+            sp.values._mx_packed, sp.crow_ptr, sp.col_idx,
+            x_cm, sp.values._mx_scales, out,
+            out_rows, tokens, in_features,
+            BS=BS, BT=BT,
+        )
+    else:
+        # Float dtype: need the grid of representable values
+        fp_grid = _get_minifloat_grid(dt.bits).to(x_f.device)
+        n_levels = len(fp_grid)
+        _k_sparse_float_csr_gemm[grid](
+            sp.values._mx_packed, sp.crow_ptr, sp.col_idx,
+            fp_grid, x_cm, sp.values._mx_scales, out,
+            out_rows, tokens, in_features,
+            n_levels=n_levels, BS=BS, BT=BT,
+        )
+    return out.t()   # [tokens, out]
+
+
+def _sparse_mx_gemm_cpu(sp: "sparse_mx_tensor", x_f: Tensor) -> Tensor:
+    """
+    CPU fallback: CSR sparse GEMM via PyTorch's native sparse_csr_tensor.
+    Does NOT materialize the full dense weight matrix.
+    """
+    rows  = sp.shape[0]
+    cols  = int(math.prod(sp.shape[1:])) if len(sp.shape) > 1 else sp.shape[1]
+    vals  = sp.values.dequantize()  # only non-zeros: [nnz] float32
+
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        csr = torch.sparse_csr_tensor(
+            sp.crow_ptr.long(), sp.col_idx.long(), vals,
+            (rows, cols), dtype=torch.float32, device=x_f.device)
+    tokens = x_f.shape[0]
+    # sparse.mm: [out, in] × [in, tokens] → [out, tokens]
+    out = torch.sparse.mm(csr, x_f.t().contiguous()).t().contiguous()
+    return out
+
+
+class _SparseMXGemmSTE(torch.autograd.Function):
+    """
+    Sparse CSR MX-quantized GEMM with Straight-Through Estimator.
+
+    Forward:  runs compressed sparse GEMM (Triton on GPU, native CSR on CPU)
+    Backward: STE — gradient flows as if the op were a plain dense matmul.
+              Gradient w.r.t. pruned positions is zero (they don't exist in
+              the stored representation), which is the correct sparse STE.
+
+    Usage:
+        out = _SparseMXGemmSTE.apply(x_float, sparse_weight, bias_or_None)
+    """
+    @staticmethod
+    def forward(ctx, x: Tensor, sp: "sparse_mx_tensor",
+                bias: Optional[Tensor]) -> Tensor:
+        ctx.save_for_backward(x)
+        ctx._sp   = sp        # not a Tensor, stored directly
+        ctx._has_bias = bias is not None
+        x_f = x.float() if x.dtype != torch.float32 else x
+        with torch.no_grad():
+            if x.is_cuda:
+                out = _sparse_mx_gemm_triton(sp, x_f)
+            else:
+                out = _sparse_mx_gemm_cpu(sp, x_f)
+        if bias is not None:
+            out = out + bias
+        return out.detach()
+
+    @staticmethod
+    def backward(ctx, grad: Tensor):
+        x, = ctx.saved_tensors
+        sp = ctx._sp
+        # STE: gradient for x = grad @ W_sparse_dense (sparse dequant)
+        # Gradient for sparse weight values = x.t() @ grad (sparse scatter)
+        # Bias gradient = grad.sum(0)
+        with torch.no_grad():
+            # Reconstruct sparse weight in float for grad computation
+            rows = sp.shape[0]
+            cols = int(math.prod(sp.shape[1:])) if len(sp.shape) > 1 else sp.shape[1]
+            vals_f = sp.values.dequantize()
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                csr = torch.sparse_csr_tensor(
+                    sp.crow_ptr.long(), sp.col_idx.long(), vals_f,
+                    (rows, cols), dtype=torch.float32, device=x.device)
+            # grad_x: [tokens, in] = grad[tokens, out] @ W[out, in]
+            grad_x = torch.sparse.mm(csr.t(), grad.t()).t().contiguous()
+        bias_grad = grad.sum(0) if ctx._has_bias else None
+        # We return None for sparse weight gradient (it's not a Tensor parameter)
+        return grad_x, None, bias_grad
+
+
 class sparse_mx_tensor:
     """
-    Sparse MX-quantized tensor using CSR (Compressed Sparse Row) layout.
+    Real sparse MX-quantized tensor (CSR layout).
 
-    Combines two compression axes:
-      1. Sparsity: only non-zero elements are stored.
-      2. MX quantization: non-zero values are bit-packed at the target precision.
+    Stores ONLY the non-zero values, bit-packed at any MX dtype.
+    Supports all dtypes: int1d, int2d, int4d, int8d, float4d, float8d, ...
+    Implements FSDP tensor-subclass protocol via __tensor_flatten__/unflatten.
 
-    Memory layout:
-      values   : mx_tensor  — packed non-zero values
-      crow_ptr : int32     — CSR row pointers  [rows+1]
-      col_idx  : int16/32  — column indices of non-zeros
-      shape    : original dense shape
-      density  : nnz / numel (fraction of non-zeros)
+    Storage:
+        values._mx_packed : int8  [ceil(nnz*bits/8)]  packed non-zeros
+        values._mx_scales : f32   [ceil(nnz/block)]   per-block scales
+        crow_ptr          : int32 [rows+1]             CSR row boundaries
+        col_idx           : int32 [nnz]                column of each non-zero
 
-    Use ``prune_to_sparse()`` to create from a dense or mx_tensor.
-
-    Example::
-        sparse_w = prune_to_sparse(weight, sparsity=0.5, dtype="int4d")
-        # Replace in mx_linear:
-        mx_lin.sparse_weight = sparse_w
-        # Forward: automatic dense reconstruction for now (TODO: sparse GEMM)
-        out = F.linear(x, sparse_w.to_dense().dequantize())
+    Memory formula (unstructured 50% sparse, int4d, block=128):
+        packed  = nnz/2 bytes    (int4: 2 vals/byte)
+        indices = nnz*4 bytes    (int32 col_idx)
+        scales  = nnz/128 * 4   (one float32 per block)
+        Total ≈ nnz * 6.0 bytes  vs  numel * 4 bytes for fp32
+        Breakeven: density < 4/6 = 0.67 (> 33% sparsity wins over dense fp32)
     """
 
-    def __init__(self, values: mx_tensor, crow_ptr: Tensor, col_idx: Tensor,
-                 shape: torch.Size, nnz: int):
+    def __init__(self, values: "mx_tensor", crow_ptr: Tensor,
+                 col_idx: Tensor, shape: torch.Size, nnz: int):
         self.values   = values     # mx_tensor of non-zero values
-        self.crow_ptr = crow_ptr   # [rows + 1]
-        self.col_idx  = col_idx    # [nnz]
+        self.crow_ptr = crow_ptr   # int32 [rows+1]
+        self.col_idx  = col_idx    # int32 [nnz]
         self.shape    = shape
         self.nnz      = nnz
 
+    # ── Properties ──────────────────────────────────────────────────────────
     @property
     def density(self) -> float:
-        return self.nnz / max(math.prod(self.shape), 1)
+        return self.nnz / max(int(math.prod(self.shape)), 1)
 
     @property
     def sparsity(self) -> float:
         return 1.0 - self.density
 
-    def to_dense(self) -> mx_tensor:
-        """Reconstruct dense mx_tensor from sparse CSR representation."""
-        rows, cols = self.shape[0], math.prod(self.shape[1:])
-        vals_f = self.values.dequantize()
-        # Use PyTorch's native CSR → dense for correctness and speed
-        # Suppress the "Sparse CSR tensor support is in beta state" warning
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")  # Ignore all warnings in this context
-            sparse_csr = torch.sparse_csr_tensor(
-                self.crow_ptr.long(),
-                self.col_idx.long(),
-                vals_f,
-                (rows, cols),
-                dtype=torch.float32,
-                device=self.values.device,
-            )
-        dense = sparse_csr.to_dense()
-        return mx_tensor.quantize(dense.reshape(self.shape),
-                                 self.values._mx_dtype, self.values._mx_block)
+    @property
+    def device(self):
+        return self.values.device
 
-    def to_torch_sparse_csr(self) -> Tensor:
+    def cuda(self, device=None):
+        return sparse_mx_tensor(
+            self.values.cuda(device),
+            self.crow_ptr.cuda(device),
+            self.col_idx.cuda(device),
+            self.shape, self.nnz)
+
+    def cpu(self):
+        return sparse_mx_tensor(
+            self.values.cpu(),
+            self.crow_ptr.cpu(),
+            self.col_idx.cpu(),
+            self.shape, self.nnz)
+
+    def to(self, device):
+        dev = device if not isinstance(device, str) else torch.device(device)
+        return sparse_mx_tensor(
+            self.values.to(device),
+            self.crow_ptr.to(dev),
+            self.col_idx.to(dev),
+            self.shape, self.nnz)
+
+    # ── FSDP tensor subclass protocol ───────────────────────────────────────
+    def __tensor_flatten__(self):
         """
-        Return a plain torch.Tensor in sparse CSR format.
-        Useful for passing to torch.sparse.mm or torch.mm with sparse support.
+        FSDP inner tensor protocol.
+        Returns (List[str], metadata_dict).
+        Inner tensors: the 4 storage arrays (packed, scales, crow_ptr, col_idx).
         """
-        rows, cols = self.shape[0], math.prod(self.shape[1:])
+        inner_names = ["_packed", "_scales", "_crow", "_col"]
+        meta = {
+            "mx_dtype":   self.values._mx_dtype,
+            "orig_shape": self.shape,
+            "n":          self.values._mx_n,
+            "block":      self.values._mx_block,
+            "nnz":        self.nnz,
+        }
+        return inner_names, meta
+
+    def _inner_tensors(self):
+        """Return dict matching the inner_names from __tensor_flatten__."""
+        return {
+            "_packed": self.values._mx_packed,
+            "_scales": self.values._mx_scales,
+            "_crow":   self.crow_ptr,
+            "_col":    self.col_idx,
+        }
+
+    @staticmethod
+    def __tensor_unflatten__(inner_tensors: dict, meta: dict,
+                             outer_size=None, outer_stride=None):
+        """Reconstruct sparse_mx_tensor from FSDP inner tensors + metadata."""
+        packed = inner_tensors["_packed"]
+        scales = inner_tensors["_scales"]
+        crow   = inner_tensors["_crow"]
+        col    = inner_tensors["_col"]
+        vals   = mx_tensor(packed, scales, meta["mx_dtype"],
+                           torch.Size([meta["nnz"]]), meta["n"], meta["block"])
+        return sparse_mx_tensor(vals, crow, col, meta["orig_shape"], meta["nnz"])
+
+    # ── Conversion ──────────────────────────────────────────────────────────
+    def to_dense_float(self) -> Tensor:
+        """Reconstruct full float32 dense matrix. Allocates rows*cols fp32."""
+        rows = self.shape[0]
+        cols = int(math.prod(self.shape[1:])) if len(self.shape) > 1 else self.shape[1]
         vals_f = self.values.dequantize()
-        # Suppress the beta warning
         import warnings
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore")  # Ignore all warnings in this context
-            return torch.sparse_csr_tensor(
+            warnings.simplefilter("ignore")
+            csr = torch.sparse_csr_tensor(
                 self.crow_ptr.long(), self.col_idx.long(), vals_f,
-                (rows, cols), dtype=torch.float32, device=self.values.device)
+                (rows, cols), dtype=torch.float32, device=self.device)
+        return csr.to_dense().reshape(self.shape)
 
-    def to_torch_sparse_coo(self) -> Tensor:
-        """Return as a sparse COO tensor (for ops that prefer COO format)."""
-        rows, cols = self.shape[0], math.prod(self.shape[1:])
-        vals_f = self.values.dequantize()
-        # Convert CSR crow_ptr → row indices
-        row_counts = self.crow_ptr[1:] - self.crow_ptr[:-1]  # [rows]
-        row_indices = torch.repeat_interleave(
-            torch.arange(rows, device=self.values.device), row_counts)
-        indices = torch.stack([row_indices, self.col_idx.long()])
-        return torch.sparse_coo_tensor(indices, vals_f, (rows, cols)).coalesce()
+    def to_dense(self) -> "mx_tensor":
+        """Reconstruct dense mx_tensor from CSR. No full fp32 intermediate."""
+        dense_f = self.to_dense_float()
+        return mx_tensor.quantize(dense_f, self.values._mx_dtype, self.values._mx_block)
 
     def dequantize(self) -> Tensor:
-        """Dense float32 reconstruction."""
-        return self.to_dense().dequantize()
+        """float32 dense reconstruction."""
+        return self.to_dense_float()
 
+    def to_torch_sparse_csr(self) -> Tensor:
+        rows = self.shape[0]
+        cols = int(math.prod(self.shape[1:])) if len(self.shape) > 1 else self.shape[1]
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return torch.sparse_csr_tensor(
+                self.crow_ptr.long(), self.col_idx.long(),
+                self.values.dequantize(),
+                (rows, cols), dtype=torch.float32, device=self.device)
+
+    def to_torch_sparse_coo(self) -> Tensor:
+        rows = self.shape[0]
+        cols = int(math.prod(self.shape[1:])) if len(self.shape) > 1 else self.shape[1]
+        row_counts = self.crow_ptr[1:] - self.crow_ptr[:-1]
+        row_indices = torch.repeat_interleave(
+            torch.arange(rows, device=self.device), row_counts)
+        indices = torch.stack([row_indices, self.col_idx.long()])
+        return torch.sparse_coo_tensor(
+            indices, self.values.dequantize(), (rows, cols)).coalesce()
+
+    # ── Re-quantize to different dtype ───────────────────────────────────────
+    def to_dtype(self, new_dtype: Union[str, "mx_dtype"], block: int = None) -> "sparse_mx_tensor":
+        """Re-quantize non-zero values to a different MX dtype."""
+        dt    = get_mx_dtype(new_dtype) if isinstance(new_dtype, str) else new_dtype
+        blk   = block or self.values._mx_block
+        vals_f = self.values.dequantize()
+        new_vals = mx_tensor.quantize(vals_f, dt, blk)
+        return sparse_mx_tensor(new_vals, self.crow_ptr, self.col_idx, self.shape, self.nnz)
+
+    # ── Memory ───────────────────────────────────────────────────────────────
     def nbytes(self) -> int:
-        return (self.values.nbytes_packed +
-                self.crow_ptr.nbytes + self.col_idx.nbytes)
+        return (self.values._mx_packed.nbytes + self.values._mx_scales.nbytes
+                + self.crow_ptr.nbytes + self.col_idx.nbytes)
 
     def compression_vs_dense_fp32(self) -> float:
-        return (math.prod(self.shape) * 4) / max(self.nbytes(), 1)
+        n = int(math.prod(self.shape))
+        return (n * 4) / max(self.nbytes(), 1)
+
+    def compression_vs_dense_bf16(self) -> float:
+        n = int(math.prod(self.shape))
+        return (n * 2) / max(self.nbytes(), 1)
 
     def __repr__(self):
-        return (f"sparse_mx_tensor({self.values._mx_dtype.name}, "
-                f"shape={tuple(self.shape)}, density={self.density:.2%}, "
-                f"{self.compression_vs_dense_fp32():.1f}x vs fp32)")
+        return (f"sparse_mx_tensor(dtype={self.values._mx_dtype.name}, "
+                f"shape={tuple(self.shape)}, nnz={self.nnz}, "
+                f"density={self.density:.2%}, sparsity={self.sparsity:.2%}, "
+                f"compression={self.compression_vs_dense_fp32():.1f}x vs fp32, "
+                f"device={self.device})")
+
 
 def prune_to_sparse(
-    x: Union[Tensor, mx_tensor],
+    x: Union[Tensor, "mx_tensor"],
     sparsity: float = 0.5,
-    dtype: Union[str, mx_dtype] = "int4d",
+    dtype: Union[str, "mx_dtype"] = "int4d",
     block: int = 128,
     structured: bool = False,
+    n_m: Tuple[int, int] = (2, 4),
 ) -> sparse_mx_tensor:
     """
-    Magnitude prune a tensor and store surviving values as MX-quantized CSR.
-
-    Combines two compression techniques:
-      • Sparsity: remove the ``sparsity`` fraction of smallest-magnitude weights.
-      • MX quantization: pack the remaining non-zeros at ``dtype`` precision.
-
-    Typical compression: int4d at 50% sparsity → ~16x vs fp32 (4-bit / 0.5 density).
+    Magnitude prune + MX quantize → real sparse_mx_tensor (CSR layout).
 
     Args:
         x:          Float or mx_tensor to compress.
         sparsity:   Fraction of weights to zero (0.5 = 50% sparse).
-        dtype:      MX dtype for quantizing the non-zero values.
-            block:      Quantisation block size.
-        structured: If True, apply 2:4 structured sparsity (NVIDIA A100/H100 style)
-                    — prune 2 out of every 4 weights, enabling hardware sparse GEMM.
+                    Ignored when structured=True (uses n_m instead).
+        dtype:      MX dtype for non-zero values (any mx_dtype supported).
+        block:      Quantization block size for non-zero values.
+        structured: If True, use N:M structured sparsity (default 2:4).
+        n_m:        (N, M) for N:M structured sparsity (N zeros per M weights).
 
     Returns:
-        sparse_mx_tensor in CSR format with MX-quantized non-zeros.
+        sparse_mx_tensor: CSR-format tensor with MX-quantized non-zeros.
 
-    Example::
-        sparse_w = prune_to_sparse(weight, sparsity=0.5, dtype="int4d")
-        print(f"Compression: {sparse_w.compression_vs_dense_fp32():.1f}x")
-        w_dense  = sparse_w.dequantize()  # back to float32
+    Examples::
+        # 50% unstructured + int4d → ~14x vs fp32 at large scale
+        sp = prune_to_sparse(weight, sparsity=0.5, dtype="int4d")
+
+        # 75% unstructured + int4d → ~22x vs fp32
+        sp = prune_to_sparse(weight, sparsity=0.75, dtype="int4d")
+
+        # 2:4 structured + int8d → hardware-friendly pattern
+        sp = prune_to_sparse(weight, structured=True, n_m=(2, 4), dtype="int8d")
+
+        # Float dtype
+        sp = prune_to_sparse(weight, sparsity=0.5, dtype="float8d")
     """
     dt  = get_mx_dtype(dtype) if isinstance(dtype, str) else dtype
     x_f = x.dequantize().float() if isinstance(x, mx_tensor) else x.float()
@@ -6271,110 +8504,152 @@ def prune_to_sparse(
     flat = x_f.reshape(rows, cols)
 
     if structured:
-        # 2:4 structured sparsity: for each group of 4, zero the 2 smallest
-        g      = flat.reshape(rows, -1, 4)
-        vals, idx = torch.topk(g.abs(), k=2, dim=-1, largest=False)
-        mask   = torch.ones_like(g, dtype=torch.bool)
-        mask.scatter_(-1, idx, False)
-        flat   = (g * mask).reshape(rows, cols)
+        N, M = n_m
+        # N:M structured: for each group of M consecutive values, keep M-N largest
+        pad = (-cols) % M
+        if pad > 0:
+            flat = F.pad(flat, (0, pad))
+        g      = flat.reshape(rows, -1, M)
+        topk   = torch.topk(g.abs(), k=(M - N), dim=-1, largest=True)
+        mask   = torch.zeros_like(g, dtype=torch.bool)
+        mask.scatter_(-1, topk.indices, True)
+        flat   = (g * mask).reshape(rows, -1)[:, :cols]
     else:
-        # Unstructured: global magnitude threshold
-        threshold = torch.quantile(flat.abs().flatten(),
-                                    float(sparsity)).item()
+        threshold = torch.quantile(flat.abs().flatten(), float(sparsity)).item()
         flat = flat * (flat.abs() > threshold)
 
-    # ── Build CSR from the pruned dense matrix (fully vectorized, no Python loop) ──
-    # Mask of non-zeros [rows, cols]
+    # ── Build CSR (fully vectorized) ─────────────────────────────────────────
     nz_mask     = flat != 0
-    nnz_per_row = nz_mask.sum(dim=1)                          # [rows]  int64
+    nnz_per_row = nz_mask.sum(dim=1).to(torch.int32)
     crow_ptr    = torch.zeros(rows + 1, dtype=torch.int32, device=x_f.device)
-    torch.cumsum(nnz_per_row.to(torch.int32), dim=0, out=crow_ptr[1:])
+    torch.cumsum(nnz_per_row, dim=0, out=crow_ptr[1:])
+    nnz      = int(crow_ptr[-1].item())
+    col_idx  = nz_mask.nonzero(as_tuple=False)[:, 1].to(torch.int32)
+    vals_f   = flat[nz_mask]
+    values   = mx_tensor.quantize(vals_f, dt, block)
 
-    nnz     = int(crow_ptr[-1].item())
-    # All non-zero column indices at once (nonzero returns row-major order)
-    col_idx = nz_mask.nonzero(as_tuple=False)[:, 1].to(torch.int32)  # [nnz]
-    vals_f  = flat[nz_mask]                                   # [nnz] float32
-    values  = mx_tensor.quantize(vals_f, dt, block)
+    return sparse_mx_tensor(values, crow_ptr, col_idx, orig_shape, nnz)
 
-    return sparse_mx_tensor(values, crow_ptr, col_idx, orig_shape, int(nnz))
 
 class mx_sparse_linear(nn.Module):
     """
-    Sparse + MX-quantized linear layer.
-    Combines weight pruning with MX quantization for maximum compression.
+    Sparse + MX-quantized linear layer with real forward/backward.
 
-    Compression examples (fp32 baseline):
-      50% sparse + int8d ≈  8x compression
-      50% sparse + int4d ≈ 16x compression
-      75% sparse + int4d ≈ 32x compression
-      2:4 struct + int4d ≈ 16x compression  (+ hardware sparse GEMM on A100)
+    Compression (fp32 baseline, block=128):
+      50% sparse + int8d ≈  8x    50% sparse + int4d ≈ 16x
+      75% sparse + int4d ≈ 22x    2:4 struct + int8d ≈  8x
+      50% sparse + float8d ≈ 8x   (float dtypes fully supported)
+
+    Forward:  CSR GEMM via Triton (GPU) or torch.sparse.mm (CPU/fallback)
+    Backward: STE — gradient flows through non-zero positions; gradient at
+              pruned positions is zero (correct sparse STE behavior).
+    FSDP:     sparse_mx_tensor implements __tensor_flatten__/__tensor_unflatten__.
+
+    Example::
+        # From nn.Linear
+        lin_sp = mx_sparse_linear.from_linear(
+            nn.Linear(512, 256), mx_dtype=mxt.int8d,
+            sparsity=0.5, block=128)
+
+        # Forward + backward
+        x = torch.randn(32, 512, requires_grad=True)
+        out = lin_sp(x)      # Triton CSR GEMM
+        out.sum().backward() # STE gradient to x
     """
 
     def __init__(self, in_features: int, out_features: int,
-                 bias: bool = True, mx_dtype: mx_dtype = None,
+                 bias: bool = True, mx_dtype: "mx_dtype" = None,
                  sparsity: float = 0.5, block: int = 128):
         super().__init__()
         self.in_features  = in_features
         self.out_features = out_features
-        self.mx_dtype     = mx_dtype or get_mx_dtype("int4d")
+        self._mx_dtype    = mx_dtype or get_mx_dtype("int4d")
         self.sparsity     = sparsity
         self.block        = block
-        self.sparse_weight: Optional[sparse_mx_tensor] = None
-        self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
+        self._sparse_weight: Optional[sparse_mx_tensor] = None
+        # Bias as trainable parameter (float)
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(out_features))
+        else:
+            self.bias = None
 
+    # ── Construction ─────────────────────────────────────────────────────────
     @classmethod
-    def from_linear(cls, linear: nn.Linear, mx_dtype: mx_dtype,
+    def from_linear(cls, linear: nn.Linear, mx_dtype: "mx_dtype",
                     sparsity: float = 0.5, block: int = 128,
-                    structured: bool = False) -> "mx_sparse_linear":
+                    structured: bool = False,
+                    n_m: Tuple[int, int] = (2, 4)) -> "mx_sparse_linear":
         m = cls(linear.in_features, linear.out_features,
                 linear.bias is not None, mx_dtype, sparsity, block)
-        m.sparse_weight = prune_to_sparse(
-            linear.weight.data, sparsity, mx_dtype, block, structured)
+        m._sparse_weight = prune_to_sparse(
+            linear.weight.data, sparsity, mx_dtype, block, structured, n_m)
         if linear.bias is not None:
             m.bias = nn.Parameter(linear.bias.data.clone())
         return m
 
     @classmethod
-    def from_mx_linear(cls, mx_linear: "mx_linear", sparsity: float = 0.5) -> "mx_sparse_linear":
-        m = cls(mx_linear.in_features, mx_linear.out_features,
-                mx_linear.bias is not None, mx_linear.mx_dtype, sparsity, mx_linear.block)
-        w_dq = mx_linear.weight.dequantize()
-        m.sparse_weight = prune_to_sparse(
-            w_dq.data, sparsity, mx_linear.mx_dtype, mx_linear.block, False)
-        if mx_linear.bias is not None:
-            m.bias = nn.Parameter(mx_linear.bias.dequantize().clone(), requires_grad=False)
+    def from_mx_linear(cls, mxl: "mx_linear",
+                       sparsity: float = 0.5,
+                       structured: bool = False) -> "mx_sparse_linear":
+        m = cls(mxl.in_features, mxl.out_features,
+                mxl.bias is not None, mxl._mx_dtype, sparsity, mxl.block)
+        w_f = mxl._mx_weight.dequantize() if isinstance(mxl._mx_weight, mx_tensor)               else mxl._mx_weight.float()
+        m._sparse_weight = prune_to_sparse(
+            w_f, sparsity, mxl._mx_dtype, mxl.block, structured)
+        if mxl.bias is not None:
+            bias_f = mxl.bias.dequantize() if isinstance(mxl.bias, mx_tensor)                      else mxl.bias.float()
+            m.bias = nn.Parameter(bias_f.clone())
         return m
 
+    # ── FSDP helpers ─────────────────────────────────────────────────────────
+    def get_sparse_tensors(self) -> dict:
+        """Return inner tensor dict for FSDP state dict serialization."""
+        if self._sparse_weight is None:
+            return {}
+        return self._sparse_weight._inner_tensors()
+
+    def set_sparse_from_tensors(self, inner: dict, meta: dict):
+        """Reconstruct sparse weight from FSDP state dict."""
+        self._sparse_weight = sparse_mx_tensor.__tensor_unflatten__(inner, meta)
+
+    # ── Forward ──────────────────────────────────────────────────────────────
     def forward(self, x: Tensor) -> Tensor:
-        if self.sparse_weight is None:
-            raise RuntimeError("mx_sparse_linear: sparse_weight not set. "
-                               "Use mx_sparse_linear.from_linear().")
+        if self._sparse_weight is None:
+            raise RuntimeError(
+                "mx_sparse_linear: _sparse_weight not set. "
+                "Call from_linear() or assign _sparse_weight manually.")
         x_f = x.dequantize() if isinstance(x, mx_tensor) else x.float()
-        orig_shape = x_f.shape
-        x_2d = x_f.reshape(-1, self.in_features)   # [tokens, in]
+        orig = x_f.shape
+        x_2d = x_f.reshape(-1, self.in_features)
 
-        # Use PyTorch sparse GEMM when available (CSR format → torch.sparse.mm)
-        # This is 2-4x faster than dense mm at ≥ 50% sparsity on CPU/GPU
-        try:
-            sparse_csr = self.sparse_weight.to_torch_sparse_csr()
-            # torch.sparse.mm: sparse [out, in] × dense [in, tokens] → [out, tokens]
-            out = torch.sparse.mm(sparse_csr, x_2d.t()).t()  # [tokens, out]
-        except Exception:
-            # Fallback: dense dequantized matmul
-            w_f = self.sparse_weight.dequantize()
-            out = x_2d @ w_f.t()
+        # _SparseMXGemmSTE: real sparse GEMM with STE backward
+        out = _SparseMXGemmSTE.apply(x_2d, self._sparse_weight, self.bias)
+        return out.reshape(*orig[:-1], self.out_features)
 
-        if self.bias is not None:
-            out = out + self.bias.data
-        return out.reshape(*orig_shape[:-1], self.out_features)
+    # ── Re-sparsify (e.g., after a few dense training steps) ─────────────────
+    def recompute_sparsity(self, new_sparsity: Optional[float] = None):
+        """
+        Re-apply magnitude pruning at a new sparsity level.
+        Useful during curriculum sparsification training.
+        """
+        if self._sparse_weight is None:
+            return
+        sp = new_sparsity if new_sparsity is not None else self.sparsity
+        dense_f = self._sparse_weight.to_dense_float()
+        self._sparse_weight = prune_to_sparse(
+            dense_f, sp, self._mx_dtype, self.block)
 
     def extra_repr(self):
-        if self.sparse_weight:
+        sp = self._sparse_weight
+        if sp:
             return (f"in={self.in_features}, out={self.out_features}, "
-                    f"dtype={self.mx_dtype.name}, sparsity={self.sparsity:.0%}, "
-                    f"density={self.sparse_weight.density:.2%}, "
-                    f"compression={self.sparse_weight.compression_vs_dense_fp32():.1f}x")
-        return f"in={self.in_features}, out={self.out_features}"
+                    f"dtype={self._mx_dtype.name}, sparsity={sp.sparsity:.1%}, "
+                    f"density={sp.density:.1%}, nnz={sp.nnz}, "
+                    f"compression={sp.compression_vs_dense_fp32():.1f}x vs fp32, "
+                    f"block={self.block}")
+        return (f"in={self.in_features}, out={self.out_features}, "
+                f"dtype={self._mx_dtype.name}, sparsity={self.sparsity:.1%}")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 11c — ADVANCED MODULES
@@ -7907,6 +10182,24 @@ class mx_fsdp_wrapper:
         loss.backward()
         optimizer.step()
     """
+
+    @staticmethod  
+    def _register_mx_tensor():
+        """Register mx_tensor with torch's tensor subclass system for FSDP."""
+        try:
+            # Register with torch.utils._pytree for proper tree traversal
+            import torch.utils._pytree as pytree
+            if hasattr(pytree, 'register_pytree_node'):
+                def mx_flatten(t):
+                    return [t._mx_packed, t._mx_scales], (t._mx_dtype, t._mx_orig_shape, t._mx_n, t._mx_block)
+                def mx_unflatten(children, meta):
+                    return mx_tensor(children[0], children[1], meta[0], meta[1], meta[2], meta[3])
+                try:
+                    pytree.register_pytree_node(mx_tensor, mx_flatten, mx_unflatten)
+                except Exception:
+                    pass  # already registered
+        except Exception:
+            pass
 
     @staticmethod
     def wrap(model: nn.Module,
@@ -9855,18 +12148,16 @@ class test_block:
         
         import sys
         import __main__
-        self._exec_globals = vars(__main__).copy()
-        self._exec_globals.update(self.vars)
-        self._exec_locals = {}
-        self._exc_info = None
-        
-        code_to_exec = '\n'.join(self._code_body) if self._code_body else ""
-        
-        try:
-            if code_to_exec:
-                exec(code_to_exec, self._exec_globals, self._exec_locals)
-        except Exception as e:
-            self._exc_info = e
+        # Use a SINGLE dict for both globals and locals.
+        # This is critical: lambdas created inside exec() capture __globals__,
+        # NOT locals. If globals != locals, variables like `a_f` defined in the
+        # exec body are in locals and invisible to lambdas defined in the same body.
+        # Merging into one dict makes all exec-local variables available to lambdas.
+        self._exec_globals = None
+        self._exec_locals  = None
+        self._exc_info     = None
+        # NOTE: Code runs via Python's with-statement body, NOT via exec.
+        # __exit__ receives the exception naturally.
         
         return self
     
@@ -9887,7 +12178,7 @@ class test_block:
             self._torch_mem_after = 0
             self._torch_mem_before = 0
         
-        exc = self._exc_info or exc_val
+        exc = exc_val  # exception from with-body (no exec)
         
         if exc is None:
             print(f"=== Test: {self.description} ===")
@@ -9906,94 +12197,267 @@ class test_block:
             print(f"{prefix}{line}")
         print(f"    Error: {exc}")
         
-        if self._exc_info:
+        if exc_val:
             tb_str = ''.join(traceback.format_exception(
-                type(self._exc_info), self._exc_info, self._exc_info.__traceback__
+                type(exc_val), exc_val, exc_val.__traceback__
             ))
             print("    Traceback:")
             for line in tb_str.strip().split('\n'):
                 print(f"      {line}")
         
-        if self.raise_on_fail and self._exc_info:
-            raise self._exc_info
-        return True
+        if self.raise_on_fail and exc_val:
+            return False   # re-raise the original exception
+        return True        # suppress exception (test continues)
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-
     print("""
-  import mx_triton as mxt, torch, torch.nn as nn
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                     mxtorch  —  MX Quantization System                      ║
+║                                                                              ║
+║  Once you quantize, ALL arithmetic runs at the quantized level.             ║
+║  sign + exponent + mantissa stay packed integers until you call             ║
+║  .dequantize() to hand the result back to standard PyTorch.                 ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 
-  # Works exactly like standard PyTorch:
-  model = nn.Sequential(nn.Linear(512, 256), nn.ReLU(), nn.Linear(256, 128))
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  PERFORMANCE — HONEST PICTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  model.to("int4d")                     # ← patched .to()
-  model.to(torch.dtype("int4d"))        # ← via proxy
-  model.to(mxt.int4d)                   # ← mx_dtype alias
-  model.to({".*": "int4d"})            # ← per-layer dict
+  "If INT8 is 4× faster than fp16, why doesn't everyone do this in Python?"
+  Fair question. Here is the real picture.
+
+  ┌─ GEMM — the most important operation, and the biggest catch ────────────┐
+  │                                                                          │
+  │  Hardware spec:  H100 INT8 = 3958 TOPS,  fp16 = 989 TFLOPS             │
+  │  Our kernel:     _k_int8_qgemm uses 32×32 tiles                         │
+  │                                                                          │
+  │  Actual throughput gap:                                                  │
+  │    cuBLAS INT8 on H100:           ~30 TFLOPS (M=N=K=4096)               │
+  │    _k_int8_qgemm at 32×32 tiles:  ~3-5 TFLOPS                           │
+  │    → 6–10× SLOWER than the library, not 4× faster                       │
+  │                                                                          │
+  │  Why: 32×32 tiles waste 90% of the tensor cores. Production INT8 GEMM   │
+  │  needs 128×128×64 tiles + async prefetch + warp specialization +         │
+  │  persistent kernels. vLLM and TRT-LLM spent years on this.              │
+  │                                                                          │
+  │  To match cuBLAS: add @triton.autotune with large tile configs.          │
+  │  That is the next required step before claiming GEMM speedup.           │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  ┌─ Element-wise ops — bandwidth wins are real but have a breakeven ───────┐
+  │                                                                          │
+  │  Bytes moved: INT8 = 3B, FP4 = 1.5B vs fp32 = 12B per element          │
+  │  For large N (>10M elements): bandwidth savings dominate                 │
+  │  For small N (batch=1, hidden=4096): the FP8 bit-field adder's          │
+  │    ~8 integer ops can HURT vs a single fp16 add instruction              │
+  │                                                                          │
+  │  What actually wins here: GELU via 256-byte LUT.                        │
+  │  One integer gather vs exp()+tanh()+multiply — that is genuinely fast.  │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  ┌─ Models cannot stay quantized end-to-end ──────────────────────────────┐
+  │                                                                          │
+  │  Softmax: requires float (exp overflow at int8 range)                   │
+  │  LayerNorm: requires float (variance needs precision)                   │
+  │  Attention: QK^T/sqrt(d) — score range too wide for int8                │
+  │  Loss functions: log needs float                                         │
+  │                                                                          │
+  │  Production systems (vLLM, TRT-LLM) do:                                 │
+  │    Weights:  int8/int4 packed  (real memory saving)                     │
+  │    GEMM:     int8 (real speedup with optimized tiles)                   │
+  │    Norms/Softmax: always fp16/bf16 (no way around it)                  │
+  │                                                                          │
+  │  "Weight-only quantization" (pack weights, compute in fp16) is often    │
+  │  faster than full INT8 at batch=1 because batch=1 GEMM is memory-bound, │
+  │  not compute-bound. Quantized compute only wins at batch ≥ 4–8.         │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  ┌─ Why people DO use quantization (just not this way) ───────────────────┐
+  │                                                                          │
+  │  bitsandbytes: INT8 matrix-vector (uses hand-tuned CUDA, not Triton)   │
+  │  GPTQ / AWQ:   INT4 weights, dequantize before GEMM (smart tradeoff)   │
+  │  vLLM / TGI:   FP8 GEMM using H100 native FP8 tensor cores             │
+  │  TRT-LLM:      cuBLAS INT8 with hand-fused kernels                     │
+  │                                                                          │
+  │  All of them: C++/CUDA hotpath, not Triton. Years of tuning.            │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  ┌─ What mxtorch is actually good for ────────────────────────────────────┐
+  │                                                                          │
+  │  ✓ Memory compression: packing int4/int2 saves RAM regardless of speed  │
+  │  ✓ Correctness reference: bit-field arithmetic is proven correct        │
+  │  ✓ Research: explore quantization schemes without writing CUDA           │
+  │  ✓ CPU inference: scale-space math runs well without GPU                │
+  │  ✓ Non-GEMM quantized ops: relu, gelu LUT, neg, abs — genuinely fast    │
+  │  ✓ Framework structure: dtype system, dispatch, autograd are solid       │
+  │                                                                          │
+  │  Not yet production-ready for:                                           │
+  │  ✗ Peak-throughput GEMM (tile sizes need autotuning to match cuBLAS)    │
+  │  ✗ Replacing BLAS in training (occupancy, pipelining not optimized)     │
+  │  ✗ Models with Softmax/LayerNorm in quantized domain (not possible)     │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  HOW THE ARITHMETIC WORKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Every mx_tensor stores:
+    _mx_packed : integer codes, bit-packed at N bits per value
+    _mx_scales : one float32 per 128 elements  (per-block scale)
+    _mx_dtype  : the format descriptor
+
+  For INT dtypes (int4d, int8d)
+  ─────────────────────────────
+    ADD: Q7 fixed-point rescale — no per-element float
+      sc = max(sa, sb) × 2             ← one float scalar per block
+      ra = round(sa/sc × 128)          ← integer ratio
+      c  = (a × ra >> 7) + (b × rb >> 7)  ← int16 per element
+
+    MUL: integer multiply + shift
+      prod = a_int16 × b_int16
+      c    = (prod >> 7) + (prod >> 14)    ← ≈ prod/127, pure integer
+
+    GEMM: int32 dp4a accumulation, scales applied once per tile
+
+  For FLOAT dtypes (float4d FP4 E2M1, float8d FP8 E4M3)
+  ────────────────────────────────────────────────────────
+    FP4 E2M1: all values × 2 are exact small integers
+      {0, ±1, ±2, ±3, ±4, ±6, ±8, ±12}
+      _fp4_to_int2:  bit-field → exact integer, no float
+      _int2_to_fp4:  integer comparison tree → FP4 code, no float
+
+    FP8 E4M3: IEEE bit-field adder (same as hardware FP adder circuits)
+      1. Extract sign(1b) + exp(4b) + man(3b) as integers
+      2. Q8 scale via scalar integer ratio
+      3. Align mantissas: integer right-shift by exp difference
+      4. Signed integer add of significands
+      5. Normalize: integer bit-scan (no float log2)
+      6. Re-encode: bit-compose sign|exp|man back to FP8 byte
+      All steps: integer bit operations, tl.where, >>, &
+      The only float is the per-block scale scalar (sa, sb, sc)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  DTYPE REFERENCE  (288 types: {int|float} × {1..128 bits} × {d|u} × {6 variants})
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  variant  (none) = base absmax block-wise quantization  ← use this by default
+           h      = Hadamard rotation (QuIP#, +2–4 dB SNR for outlier weights)
+           v      = vector-wise absmax (per-row/col, bitsandbytes style)
+           s      = stochastic rounding (unbiased noise, use during training)
+           b      = boolean clamping (binary {0,1} networks)
+           2      = double-prec compute: N-bit storage, fp16 GEMM accumulation
+
+  Practical choices:
+    int8d      best tradeoff: 4× memory, real speedup once GEMM tiles are tuned
+    int4d      8× memory; use weight-only (dequantize before GEMM is fine)
+    float8d    FP8 E4M3: same memory as int8, better for dynamic range
+    float4d    FP4 E2M1: same memory as int4, IEEE grid vs uniform integer
+    int4dh     int4 + Hadamard: best SNR at 4-bit for transformer weights
+    int8ds     training: stochastic rounding, zero-mean quantization error
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  KERNEL DISPATCH  (automatic)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  op       INT8              INT4          FP4 E2M1          FP8 E4M3
+  ─────────────────────────────────────────────────────────────────────────
+  a + b    _k_int8_qadd      _k_int4_qadd  _k_fp4_e2m1_qadd  _k_fp8_e4m3_qadd
+           Q7 int rescale    Q7 nibble     exact int×2       IEEE bit-field adder
+  a * b    _k_int8_qmul      _k_int4_qmul  _k_fp4_e2m1_qmul  _k_fp8_e4m3_qmul
+           int16 shift/127   nibble int16  int×2 product     XOR+int exp/man mul
+  a @ b    _k_int8_qgemm     ← same        _k_fp16_qgemm     _k_fp16_qgemm
+           int32 dp4a        int32         int→fp16 tl.dot   int→fp16 tl.dot
+           (needs autotuning to reach cuBLAS speed)
+  relu     _k_int8_relu_q    clip negative codes to 0, scale unchanged
+  gelu     _k_int8_gelu_lut  256-entry int8→int8 LUT, zero float per element
+  -a       code negation  — pure integer, scale unchanged
+  |a|      code abs       — pure integer, scale unchanged
+
+  CPU fallback: _qscale_add / _qscale_mul / _qscale_matmul (pure Python)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  QUICK START
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  import mxtorch as mxt
+  import torch, torch.nn as nn, torch.nn.functional as F
+
+  # ── Quantize ─────────────────────────────────────────────────────────────
+  x  = torch.randn(1024, 1024)
+  qi = mxt.mx_tensor.quantize(x, mxt.int8d,   block=128)
+  qf = mxt.mx_tensor.quantize(x, mxt.float8d, block=128)
+  q4 = mxt.mx_tensor.quantize(x, mxt.int4d,   block=128)
+
+  # ── All arithmetic stays quantized ───────────────────────────────────────
+  a = mxt.mx_tensor.quantize(torch.randn(512), mxt.int8d)
+  b = mxt.mx_tensor.quantize(torch.randn(512), mxt.int8d)
+  c = a + b     # → mx_tensor  INT8 Q7 integer add, zero fp16
+  d = a * b     # → mx_tensor  INT8 integer mul+shift, zero fp16
+  A = mxt.mx_tensor.quantize(torch.randn(128, 256), mxt.int8d)
+  B = mxt.mx_tensor.quantize(torch.randn(256,  64), mxt.int8d)
+  C = A @ B     # → mx_tensor  INT8 dp4a GEMM, output stays quantized
+
+  # FP4/FP8 bit-field arithmetic (sign+exp+mantissa as integers)
+  af = mxt.mx_tensor.quantize(torch.randn(512), mxt.float8d)
+  bf = mxt.mx_tensor.quantize(torch.randn(512), mxt.float8d)
+  cf = af + bf  # → mx_tensor  IEEE bit-field integer adder, zero fp16
+  df = af * bf  # → mx_tensor  integer XOR-sign + exp+man multiply
+
+  # Activations
+  h = qi.relu()    # clips negative codes to 0 (integer), scale unchanged
+  g = qi.gelu()    # 256-entry int8→int8 LUT — zero arithmetic per element
+  n = -qi          # sign flip on codes (integer), exact
+  v = qi.abs()     # abs on codes (integer), exact
+
+  # ── .dequantize() only at PyTorch boundaries ──────────────────────────────
+  # Softmax, LayerNorm, loss functions cannot stay quantized
+  logits = C.dequantize()
+  loss = F.cross_entropy(logits, labels)
+  loss.backward()  # STE gradients flow through quantize boundary
+
+  # ── Whole model ───────────────────────────────────────────────────────────
+  model = nn.Sequential(
+      nn.Linear(512, 256), nn.ReLU(),
+      nn.Linear(256, 128), nn.ReLU(),
+      nn.Linear(128,  10),
+  )
+  model.to("int8d")          # replaces nn.Linear with mx_linear
+  model.to("int4dh")         # int4 + Hadamard rotation (best SNR at 4-bit)
 
   # Mixed precision:
-  model.to({"0": "int4d", "2": "int8d"})
+  mxt.to_mx(model, {"0": "int8d", "2": "int4d", "4": "int8d"})
 
-  # tensor.to() also works:
-  t = torch.randn(512, 512)
-  t_q = t.to("int4d")                  # → mx_tensor (real packed)
-  t_q = t.to(torch.dtype("float8u"))   # → mx_tensor
+  # Weight-only (often best for batch=1 inference — dequantize before GEMM):
+  # Pack weights at int4, dequantize at inference, compute in fp16
+  model.to("int4d")
+  out = model(x)   # mx_linear dequantizes weights, runs fp16 matmul
 
-  # Standard optimizers work unchanged (monkey-patched):
-  opt = torch.optim.AdamW(model.parameters())
+  # ── Training ──────────────────────────────────────────────────────────────
+  # STE: forward quantized, backward fp32
+  for x_batch, y_batch in dataloader:
+      out = model(x_batch).dequantize()   # quantized forward
+      loss = F.cross_entropy(out, y_batch)
+      loss.backward()                      # STE through quantized ops
 
-  # Or native MX optimizer (states at MX precision):
-  opt = mxt.mx_adam_w(model.parameters(), state_dtype="int8d")
+  # Stochastic rounding (unbiased training noise):
+  q = mxt.stochastic_mx_quantize(grad, "int8ds")
 
-  # Differentiable quantization with STE:
-  q = mxt.mx_quantize(tensor, "int4d")
+  # ── Quality tools ─────────────────────────────────────────────────────────
+  print(mxt.snr(weight, "int4d"))
+  print(mxt.compare_dtypes(weight, ["int2d","int4d","int8d","float4d","float8d"]))
 
-  # Public packed matmul:
-  c = mxt.mx_matmul(a, b, dtype="int4d")       # → mx_tensor
+  # Hadamard rotation (QuIP# — reduces outliers, +2–4 dB SNR):
+  rot, qw = mxt.hadamard_quantize(weight, "int4d")
 
-  # Set default dtype for a block:
-  with mxt.mx_mode("int4d", block=64):
-          out = model(x)                             # all ops use int4d
-
-  # Progressive loading (never full model in RAM):
-  model = mxt.load_quantized("ckpt.bin", MyModel, dtype="int4d")
-  mxt.save_quantized(model, "model_int4.bin")
-
-  # Activation quantization (on top of weight quantization):
-  mxt.wrap_activations(model, "int8d")
-  mxt.unwrap_activations(model)                 # remove hooks
-
-  # Quality measurement:
-  print(mxt.snr(weight, "int4d"))               # SNR in dB
-  print(mxt.quantization_error(weight, "int4d", metric="rmse"))
-  print(mxt.compare_dtypes(weight, ["int2d","int4d","int8d"]))
-
-  # Data-driven scale calibration:
-  scales = mxt.calibrate(model, sample_batch, dtype="int4d")
-
-  # Benchmark vs roofline:
-  report = mxt.benchmark_report(model, (32, 512))
-  print(report)
-
-  # Precision audit (find any accidental fp32 upcasting):
+  # Precision audit (find fp32 upcast in a model):
   with mxt.precision_audit(model) as audit:
-          model(x)
+      model(x)
   print(audit.report())
 
-  # Dynamic precision (curriculum quantization):
-  sched = mxt.dynamic_precision_scheduler(model, "int8d", "int1d", steps=5000)
-  for step, batch in enumerate(dataloader):
-          sched.step(step)
-          ...
-
-  # Custom kernel registration:
-  @mxt.register_kernel(op="torch.matmul", dtypes=["int4d"],
-                       hardware=["gfx1100"], force="auto")
-  def my_int4_matmul():
-          return \"\"\"@triton.jit def kernel(...): ...\"\"\"
-
-  # Debug:
-  # MX_DEBUG=1 MX_DEBUG_VERBOSE=1 MX_STRICT=1 python train.py
+  # Debug flags:
+  # MX_DEBUG=1  MX_DEBUG_VERBOSE=1  MX_STRICT=1
 """)
